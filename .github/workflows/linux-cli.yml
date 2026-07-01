@@ -1,0 +1,34 @@
+name: linux-cli
+
+on:
+  pull_request:
+    paths:
+      - "linux-cli/**"
+      - ".github/workflows/linux-cli.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "linux-cli/**"
+      - ".github/workflows/linux-cli.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: linux-cli/go.mod
+
+      - name: Check formatting
+        working-directory: linux-cli
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run tests
+        working-directory: linux-cli
+        run: go test ./...
