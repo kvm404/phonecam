@@ -1,0 +1,54 @@
+name: Feature plan
+description: Plan a PhoneCam feature before implementation.
+title: "[Plan]: "
+labels: ["ready-for-agent"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the intended user-facing behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: technical
+    attributes:
+      label: Technical notes
+      description: Architecture, interfaces, dependencies, and tradeoffs.
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing plan
+      description: How will this be verified?
+    validations:
+      required: true
+  - type: textarea
+    id: performance
+    attributes:
+      label: Performance impact
+      description: Latency, CPU, battery, stability, and measurement plan.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: Linux distro, desktop, virtual camera, meeting app, browser, or Android compatibility risks.
+    validations:
+      required: true
+  - type: textarea
+    id: privacy_security
+    attributes:
+      label: Privacy and security impact
+      description: Pairing, authentication, local network transport, permissions, and stored data risks.
+    validations:
+      required: true
