@@ -32,3 +32,7 @@ jobs:
       - name: Run tests
         working-directory: linux-cli
         run: go test ./...
+
+      - name: Run race tests
+        working-directory: linux-cli
+        run: go test -race ./...

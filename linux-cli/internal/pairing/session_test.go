@@ -1,0 +1,280 @@
+package pairing
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"net"
+	"testing"
+	"time"
+)
+
+func TestNewBuildsVersionedPayload(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	payload := session.Payload()
+	if payload.Version != ProtocolVersion {
+		t.Fatalf("expected protocol version %d, got %d", ProtocolVersion, payload.Version)
+	}
+	if payload.Name != "phonecam-linux" {
+		t.Fatalf("expected default laptop name, got %q", payload.Name)
+	}
+	if payload.Control != "http://192.168.1.42:49321" {
+		t.Fatalf("unexpected control URL: %q", payload.Control)
+	}
+	if payload.RTP != "192.168.1.42:49322" {
+		t.Fatalf("unexpected RTP endpoint: %q", payload.RTP)
+	}
+	if payload.Transport != "rtp-h264" {
+		t.Fatalf("unexpected transport: %q", payload.Transport)
+	}
+	if payload.Video != (VideoProfile{Width: 1280, Height: 720, FPS: 30}) {
+		t.Fatalf("unexpected video profile: %#v", payload.Video)
+	}
+	if !payload.Expires.Equal(now.Add(DefaultTTL)) {
+		t.Fatalf("unexpected expiry: %s", payload.Expires)
+	}
+}
+
+func TestPayloadJSONIsScannableShape(t *testing.T) {
+	session := newTestSession(t, Config{})
+
+	data, err := session.PayloadJSON()
+	if err != nil {
+		t.Fatalf("PayloadJSON failed: %v", err)
+	}
+
+	var payload Payload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("payload JSON did not unmarshal: %v", err)
+	}
+	if payload.SessionID == "" || payload.Token == "" {
+		t.Fatalf("expected session id and token in payload: %s", string(data))
+	}
+}
+
+func TestTokenHasAtLeast128BitsOfEntropy(t *testing.T) {
+	session := newTestSession(t, Config{})
+	token := session.Payload().Token
+
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		t.Fatalf("token is not base64url: %v", err)
+	}
+	if len(raw) < 16 {
+		t.Fatalf("expected at least 16 token bytes, got %d", len(raw))
+	}
+}
+
+func TestConsumeTokenRejectsInvalidExpiredAndReplay(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	if err := session.ConsumeToken(tokenRequest(session, "wrong"), now); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expected invalid token error, got %v", err)
+	}
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(DefaultTTL)); !errors.Is(err, ErrExpired) {
+		t.Fatalf("expected expired token error, got %v", err)
+	}
+
+	session = newTestSession(t, Config{Now: now})
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(2*time.Second)); !errors.Is(err, ErrTokenConsumed) {
+		t.Fatalf("expected consumed token error, got %v", err)
+	}
+}
+
+func TestConsumeTokenRejectsWrongSessionID(t *testing.T) {
+	session := newTestSession(t, Config{})
+	request := tokenRequest(session, session.Payload().Token)
+	request.SessionID = "wrong-session"
+
+	if err := session.ConsumeToken(request, time.Date(2026, 7, 1, 10, 0, 1, 0, time.UTC)); !errors.Is(err, ErrInvalidSessionID) {
+		t.Fatalf("expected invalid session id, got %v", err)
+	}
+}
+
+func TestApprovalRequiresConsumedToken(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	if err := session.Approve(now.Add(time.Second)); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expected approval to require consumed token, got %v", err)
+	}
+
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("expected approval to succeed: %v", err)
+	}
+	if !session.IsApproved() {
+		t.Fatal("expected approved session")
+	}
+	if session.ApprovedPhone().Name != "Pixel" {
+		t.Fatalf("expected approved phone to be stored, got %#v", session.ApprovedPhone())
+	}
+}
+
+func TestApprovalRejectsExpiredSessionAfterTokenConsumption(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	if err := session.Approve(now.Add(DefaultTTL)); !errors.Is(err, ErrExpired) {
+		t.Fatalf("expected expired approval to fail, got %v", err)
+	}
+}
+
+func TestRTPBindingRequiresApprovalAndValidatesSource(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	source := RTPSource{IP: net.ParseIP("192.168.1.50"), Port: 50000, SSRC: 1234}
+
+	if err := session.BindRTPSource(source); !errors.Is(err, ErrNotApproved) {
+		t.Fatalf("expected approval requirement, got %v", err)
+	}
+
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("expected approval to succeed: %v", err)
+	}
+	if err := session.BindRTPSource(source); err != nil {
+		t.Fatalf("expected RTP binding to succeed: %v", err)
+	}
+	if err := session.ValidateRTPSource(source); err != nil {
+		t.Fatalf("expected matching RTP source to validate: %v", err)
+	}
+	if err := session.ValidateRTPSource(RTPSource{IP: net.ParseIP("192.168.1.51"), Port: 50000, SSRC: 1234}); !errors.Is(err, ErrSourceMismatch) {
+		t.Fatalf("expected source mismatch, got %v", err)
+	}
+	if err := session.BindRTPSource(source); !errors.Is(err, ErrAlreadyBound) {
+		t.Fatalf("expected second bind to fail, got %v", err)
+	}
+}
+
+func TestRTPBindingRejectsRaceFromUnapprovedSource(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("expected approval to succeed: %v", err)
+	}
+
+	attacker := RTPSource{IP: net.ParseIP("192.168.1.51"), Port: 50000, SSRC: 1234}
+	if err := session.BindRTPSource(attacker); !errors.Is(err, ErrSourceMismatch) {
+		t.Fatalf("expected attacker source to be rejected, got %v", err)
+	}
+}
+
+func TestInvalidateRejectsFutureSessionUse(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	request := tokenRequest(session, session.Payload().Token)
+
+	session.Invalidate()
+
+	if err := session.ConsumeToken(request, now.Add(time.Second)); !errors.Is(err, ErrInvalidated) {
+		t.Fatalf("expected invalidated token consumption to fail, got %v", err)
+	}
+	if err := session.Approve(now.Add(time.Second)); !errors.Is(err, ErrInvalidated) {
+		t.Fatalf("expected invalidated approval to fail, got %v", err)
+	}
+	if err := session.BindRTPSource(RTPSource{IP: net.ParseIP("192.168.1.50"), Port: 50000, SSRC: 1234}); !errors.Is(err, ErrInvalidated) {
+		t.Fatalf("expected invalidated bind to fail, got %v", err)
+	}
+}
+
+func TestNewRejectsInvalidEndpoint(t *testing.T) {
+	tests := []Config{
+		{ControlURL: "not a url", RTPHost: "127.0.0.1", RTPPort: 49322},
+		{ControlURL: "ftp://127.0.0.1:49321", RTPHost: "127.0.0.1", RTPPort: 49322},
+		{ControlURL: "http://127.0.0.1", RTPHost: "127.0.0.1", RTPPort: 49322},
+		{ControlURL: "http://127.0.0.1:49321", RTPHost: "", RTPPort: 49322},
+		{ControlURL: "http://127.0.0.1:49321", RTPHost: "127.0.0.1:49322", RTPPort: 49322},
+		{ControlURL: "http://127.0.0.1:49321", RTPHost: "127.0.0.1", RTPPort: 65536},
+	}
+
+	for _, test := range tests {
+		_, err := New(test)
+		if !errors.Is(err, ErrInvalidEndpoint) {
+			t.Fatalf("expected invalid endpoint error for %#v, got %v", test, err)
+		}
+	}
+}
+
+func TestNewAcceptsIPv6RTPHost(t *testing.T) {
+	session := newTestSession(t, Config{
+		ControlURL: "http://[2001:db8::1]:49321",
+		RTPHost:    "2001:db8::1",
+	})
+
+	if session.Payload().RTP != "[2001:db8::1]:49322" {
+		t.Fatalf("expected bracketed IPv6 RTP endpoint, got %q", session.Payload().RTP)
+	}
+}
+
+func newTestSession(t *testing.T, override Config) *Session {
+	t.Helper()
+
+	config := Config{
+		ControlURL: "http://192.168.1.42:49321",
+		RTPHost:    "192.168.1.42",
+		RTPPort:    49322,
+		Now:        time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC),
+	}
+	if override.LaptopName != "" {
+		config.LaptopName = override.LaptopName
+	}
+	if override.ControlURL != "" {
+		config.ControlURL = override.ControlURL
+	}
+	if override.RTPHost != "" {
+		config.RTPHost = override.RTPHost
+	}
+	if override.RTPPort != 0 {
+		config.RTPPort = override.RTPPort
+	}
+	if override.Width != 0 {
+		config.Width = override.Width
+	}
+	if override.Height != 0 {
+		config.Height = override.Height
+	}
+	if override.FPS != 0 {
+		config.FPS = override.FPS
+	}
+	if override.TTL != 0 {
+		config.TTL = override.TTL
+	}
+	if !override.Now.IsZero() {
+		config.Now = override.Now
+	}
+
+	session, err := New(config)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	return session
+}
+
+func tokenRequest(session *Session, token string) TokenRequest {
+	return TokenRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     token,
+		Phone:     Phone{ID: "phone-1", Name: "Pixel"},
+		ControlIP: net.ParseIP("192.168.1.50"),
+		RTPPort:   50000,
+		SSRC:      1234,
+	}
+}
