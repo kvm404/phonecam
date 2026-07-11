@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/doctor"
+	"github.com/kvm404/phonecam/linux-cli/internal/start"
 )
 
 const version = "0.0.0-dev"
@@ -70,9 +72,14 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 		}
 		return 0
 	case "start":
-		fmt.Fprintln(stderr, "phonecam start is not implemented yet.")
-		fmt.Fprintln(stderr, "Next milestone: create v4l2loopback device, start pairing server, render QR code, and launch GStreamer.")
-		return 2
+		runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		err := start.New(start.OSSystem{}).Run(runCtx, start.Config{VirtualCamera: start.DefaultVirtualCamera}, stdout)
+		if err != nil && err != context.Canceled {
+			fmt.Fprintf(stderr, "phonecam start failed: %v\n", err)
+			return 1
+		}
+		return 0
 	case "status":
 		fmt.Fprintln(stderr, "phonecam status is not implemented yet.")
 		return 2
