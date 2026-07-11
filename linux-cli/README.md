@@ -9,10 +9,12 @@ The first implementation slice provides:
 - command routing for `start`, `status`, `stop`, `doctor`, `install`, `version`,
   and `help`,
 - a testable `phonecam doctor` foundation,
+- a `phonecam start` foundation that creates a pairing session and serves the
+  control API,
 - install hints for Arch, Fedora, and Ubuntu/Debian.
 
-The media receiver, pairing server, QR rendering, and process supervision are
-not implemented yet.
+The media receiver, terminal QR rendering, v4l2loopback lifecycle, and
+GStreamer process supervision are not implemented yet.
 
 ## Development
 
@@ -35,4 +37,3 @@ go run ./cmd/phonecam doctor
 - desktop session hints,
 - distro family hints,
 - LAN privacy warning.
-
