@@ -101,6 +101,7 @@ func TestRunPrintsPairingPayloadAndStopsOnContextCancel(t *testing.T) {
 		"Virtual camera: /dev/video10",
 		"Control server: http://192.168.1.42:",
 		"RTP endpoint: 192.168.1.42:",
+		"Scan this QR code with the PhoneCam Android app:",
 		"Pairing payload:",
 		`"transport": "rtp-h264"`,
 		`"width": 1280`,

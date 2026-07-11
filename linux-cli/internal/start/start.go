@@ -12,6 +12,7 @@ import (
 
 	"github.com/kvm404/phonecam/linux-cli/internal/control"
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
+	"github.com/kvm404/phonecam/linux-cli/internal/qrcode"
 )
 
 const DefaultVirtualCamera = "/dev/video10"
@@ -145,6 +146,10 @@ func writeStartOutput(w io.Writer, virtualCamera string, session *pairing.Sessio
 	if err != nil {
 		payloadJSON = []byte("{}")
 	}
+	compactPayloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		compactPayloadJSON = []byte("{}")
+	}
 
 	fmt.Fprintln(w, "PhoneCam")
 	fmt.Fprintln(w)
@@ -152,6 +157,14 @@ func writeStartOutput(w io.Writer, virtualCamera string, session *pairing.Sessio
 	fmt.Fprintln(w, "Status: Waiting for phone")
 	fmt.Fprintf(w, "Control server: %s\n", payload.Control)
 	fmt.Fprintf(w, "RTP endpoint: %s\n", payload.RTP)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Scan this QR code with the PhoneCam Android app:")
+	renderedQR, err := qrcode.RenderTerminal(string(compactPayloadJSON))
+	if err != nil {
+		fmt.Fprintf(w, "QR unavailable: %v\n", err)
+	} else {
+		fmt.Fprintln(w, renderedQR)
+	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Pairing payload:")
 	fmt.Fprintln(w, string(payloadJSON))
