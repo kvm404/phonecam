@@ -59,6 +59,17 @@ func TestRunShowsHelpWithoutArgs(t *testing.T) {
 	}
 }
 
+func TestRunHelpListsSmokeCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(nil, fakeSystem{}, []string{"help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "smoke      Run a local RTP loopback self-test") {
+		t.Fatalf("expected smoke command in help, got:\n%s", stdout.String())
+	}
+}
+
 func TestRunUnknownCommandFails(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run(nil, fakeSystem{}, []string{"wat"}, &stdout, &stderr)

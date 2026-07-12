@@ -30,10 +30,35 @@ func (r Runner) Run(ctx context.Context, config Config) error {
 	if err != nil {
 		return err
 	}
+	return r.launch(ctx, "receiver", args)
+}
 
+// RunSender launches the test sender pipeline that feeds synthetic H.264 frames
+// to the receiver over RTP.
+func (r Runner) RunSender(ctx context.Context, config SenderConfig) error {
+	args, err := SenderArgs(config)
+	if err != nil {
+		return err
+	}
+	return r.launch(ctx, "sender", args)
+}
+
+// RunReadback launches the readback pipeline that captures frames from the
+// virtual camera and exits once enough buffers have arrived.
+func (r Runner) RunReadback(ctx context.Context, config ReadbackConfig) error {
+	args, err := ReadbackArgs(config)
+	if err != nil {
+		return err
+	}
+	return r.launch(ctx, "readback", args)
+}
+
+// launch execs gst-launch-1.0 with argv, wrapping failures with a label naming
+// the pipeline that failed.
+func (r Runner) launch(ctx context.Context, label string, args []string) error {
 	command := r.command(ctx, "gst-launch-1.0", args...)
 	if err := command.Run(); err != nil {
-		return fmt.Errorf("gstreamer receiver failed: %w", err)
+		return fmt.Errorf("gstreamer %s failed: %w", label, err)
 	}
 	return nil
 }
