@@ -8,9 +8,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/control"
+	"github.com/kvm404/phonecam/linux-cli/internal/gstreamer"
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
 	"github.com/kvm404/phonecam/linux-cli/internal/qrcode"
 )
@@ -23,6 +25,10 @@ type System interface {
 	InterfaceAddrs(net.Interface) ([]net.Addr, error)
 	Listen(network, address string) (net.Listener, error)
 	ListenPacket(network, address string) (net.PacketConn, error)
+}
+
+type Receiver interface {
+	Run(ctx context.Context, config gstreamer.Config) error
 }
 
 type OSSystem struct{}
@@ -55,17 +61,29 @@ type Config struct {
 }
 
 type Runtime struct {
-	system System
+	system   System
+	receiver Receiver
 }
 
-func New(system System) Runtime {
+func New(system System, receiver Receiver) Runtime {
 	if system == nil {
 		system = OSSystem{}
 	}
-	return Runtime{system: system}
+	if receiver == nil {
+		receiver = gstreamer.NewRunner(nil)
+	}
+	return Runtime{system: system, receiver: receiver}
 }
 
 func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error {
+	recvCtx, recvCancel := context.WithCancel(ctx)
+	defer recvCancel()
+
+	virtualCamera := config.VirtualCamera
+	if virtualCamera == "" {
+		virtualCamera = DefaultVirtualCamera
+	}
+
 	host, err := localIPv4(r.system)
 	if err != nil {
 		return err
@@ -121,7 +139,12 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 		errCh <- nil
 	}()
 
-	writeStartOutput(stdout, config.VirtualCamera, session)
+	receiverErr := make(chan error, 1)
+	go func() {
+		receiverErr <- r.receiver.Run(recvCtx, gstreamer.Config{RTPPort: rtpPort, Device: virtualCamera})
+	}()
+
+	writeStartOutput(stdout, virtualCamera, session)
 
 	select {
 	case <-ctx.Done():
@@ -133,14 +156,25 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 	case err := <-errCh:
 		session.Invalidate()
 		return err
+	case err := <-receiverErr:
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+		session.Invalidate()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil {
+			return fmt.Errorf("gstreamer receiver exited unexpectedly")
+		}
+		if strings.HasPrefix(err.Error(), "gstreamer receiver") {
+			return err
+		}
+		return fmt.Errorf("gstreamer receiver: %w", err)
 	}
 }
 
 func writeStartOutput(w io.Writer, virtualCamera string, session *pairing.Session) {
-	if virtualCamera == "" {
-		virtualCamera = DefaultVirtualCamera
-	}
-
 	payload := session.Payload()
 	payloadJSON, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -74,8 +75,8 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 	case "start":
 		runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		err := start.New(start.OSSystem{}).Run(runCtx, start.Config{VirtualCamera: start.DefaultVirtualCamera}, stdout)
-		if err != nil && err != context.Canceled {
+		err := start.New(start.OSSystem{}, nil).Run(runCtx, start.Config{VirtualCamera: start.DefaultVirtualCamera}, stdout)
+		if err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintf(stderr, "phonecam start failed: %v\n", err)
 			return 1
 		}
