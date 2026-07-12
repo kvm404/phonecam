@@ -93,6 +93,29 @@ func (r resultReceiver) Run(ctx context.Context, config gstreamer.Config) error 
 	return r.err
 }
 
+// fakePreflight records the device it was asked to verify and returns a fixed
+// error (nil by default, meaning the device check passes).
+type fakePreflight struct {
+	mu        sync.Mutex
+	err       error
+	gotDevice string
+	called    bool
+}
+
+func (p *fakePreflight) Verify(device string) error {
+	p.mu.Lock()
+	p.gotDevice = device
+	p.called = true
+	p.mu.Unlock()
+	return p.err
+}
+
+func (p *fakePreflight) device() (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.gotDevice, p.called
+}
+
 func TestRunPrintsPairingPayloadAndStopsOnContextCancel(t *testing.T) {
 	system := fakeSystem{
 		hostname: "test-laptop",
@@ -109,7 +132,7 @@ func TestRunPrintsPairingPayloadAndStopsOnContextCancel(t *testing.T) {
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(system, receiver).Run(ctx, Config{
+		done <- New(system, receiver, &fakePreflight{}).Run(ctx, Config{
 			VirtualCamera: "/dev/video10",
 			RTPPort:       50123,
 			Now:           time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC),
@@ -198,7 +221,7 @@ func TestRunDefaultsVirtualCameraAndPassesItToReceiver(t *testing.T) {
 			var out lockedBuffer
 			done := make(chan error, 1)
 			go func() {
-				done <- New(testSystem(), receiver).Run(ctx, Config{
+				done <- New(testSystem(), receiver, &fakePreflight{}).Run(ctx, Config{
 					VirtualCamera: tc.virtualCamera,
 				}, &out)
 			}()
@@ -241,7 +264,7 @@ func TestRunReturnsReceiverError(t *testing.T) {
 	receiver := resultReceiver{err: errors.New("boom")}
 	var out lockedBuffer
 
-	err := New(testSystem(), receiver).Run(context.Background(), Config{}, &out)
+	err := New(testSystem(), receiver, &fakePreflight{}).Run(context.Background(), Config{}, &out)
 	if err == nil {
 		t.Fatal("expected error from receiver failure")
 	}
@@ -254,9 +277,54 @@ func TestRunReturnsErrorWhenReceiverExitsCleanly(t *testing.T) {
 	receiver := resultReceiver{err: nil}
 	var out lockedBuffer
 
-	err := New(testSystem(), receiver).Run(context.Background(), Config{}, &out)
+	err := New(testSystem(), receiver, &fakePreflight{}).Run(context.Background(), Config{}, &out)
 	if err == nil || !strings.Contains(err.Error(), "exited unexpectedly") {
 		t.Fatalf("expected exited unexpectedly error, got %v", err)
+	}
+}
+
+func TestRunFailsFastOnPreflightError(t *testing.T) {
+	receiver := &blockingReceiver{}
+	preflight := &fakePreflight{err: errors.New("virtual camera /dev/video10 does not exist")}
+	var out lockedBuffer
+
+	err := New(testSystem(), receiver, preflight).Run(context.Background(), Config{
+		VirtualCamera: "/dev/video10",
+	}, &out)
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("expected preflight error, got %v", err)
+	}
+
+	device, called := preflight.device()
+	if !called {
+		t.Fatal("expected preflight to be called")
+	}
+	if device != "/dev/video10" {
+		t.Fatalf("expected preflight device /dev/video10, got %q", device)
+	}
+
+	if _, started := receiver.receivedConfig(); started {
+		t.Fatal("expected receiver not to start when preflight fails")
+	}
+
+	if out.String() != "" {
+		t.Fatalf("expected no output on preflight failure, got:\n%s", out.String())
+	}
+}
+
+func TestRunPreflightReceivesDefaultedDevice(t *testing.T) {
+	receiver := &blockingReceiver{}
+	preflight := &fakePreflight{err: errors.New("boom")}
+	var out lockedBuffer
+
+	_ = New(testSystem(), receiver, preflight).Run(context.Background(), Config{}, &out)
+
+	device, called := preflight.device()
+	if !called {
+		t.Fatal("expected preflight to be called")
+	}
+	if device != DefaultVirtualCamera {
+		t.Fatalf("expected preflight to receive defaulted device %q, got %q", DefaultVirtualCamera, device)
 	}
 }
 
