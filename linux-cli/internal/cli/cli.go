@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/doctor"
+	"github.com/kvm404/phonecam/linux-cli/internal/smoke"
 	"github.com/kvm404/phonecam/linux-cli/internal/start"
 )
 
@@ -81,6 +82,15 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 			return 1
 		}
 		return 0
+	case "smoke":
+		runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		err := smoke.New(nil, nil, nil, nil, nil, nil).Run(runCtx, smoke.Config{Device: smoke.DefaultDevice}, stdout)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(stderr, "phonecam smoke failed: %v\n", err)
+			return 1
+		}
+		return 0
 	case "status":
 		fmt.Fprintln(stderr, "phonecam status is not implemented yet.")
 		return 2
@@ -105,6 +115,7 @@ Usage:
 
 Commands:
   start      Start pairing and the Linux receiver
+  smoke      Run a local RTP loopback self-test
   status     Show receiver and stream status
   stop       Stop the receiver
   doctor     Check Linux dependencies and setup
