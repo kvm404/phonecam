@@ -15,6 +15,7 @@ import (
 	"github.com/kvm404/phonecam/linux-cli/internal/gstreamer"
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
 	"github.com/kvm404/phonecam/linux-cli/internal/qrcode"
+	"github.com/kvm404/phonecam/linux-cli/internal/v4l2"
 )
 
 const DefaultVirtualCamera = "/dev/video10"
@@ -29,6 +30,18 @@ type System interface {
 
 type Receiver interface {
 	Run(ctx context.Context, config gstreamer.Config) error
+}
+
+// Preflight verifies the virtual camera device before the receiver is started.
+type Preflight interface {
+	Verify(device string) error
+}
+
+// v4l2Preflight adapts v4l2.Verify to the Preflight interface using OSSystem.
+type v4l2Preflight struct{}
+
+func (v4l2Preflight) Verify(device string) error {
+	return v4l2.Verify(v4l2.OSSystem{}, device)
 }
 
 type OSSystem struct{}
@@ -61,18 +74,22 @@ type Config struct {
 }
 
 type Runtime struct {
-	system   System
-	receiver Receiver
+	system    System
+	receiver  Receiver
+	preflight Preflight
 }
 
-func New(system System, receiver Receiver) Runtime {
+func New(system System, receiver Receiver, preflight Preflight) Runtime {
 	if system == nil {
 		system = OSSystem{}
 	}
 	if receiver == nil {
 		receiver = gstreamer.NewRunner(nil)
 	}
-	return Runtime{system: system, receiver: receiver}
+	if preflight == nil {
+		preflight = v4l2Preflight{}
+	}
+	return Runtime{system: system, receiver: receiver, preflight: preflight}
 }
 
 func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error {
@@ -82,6 +99,10 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 	virtualCamera := config.VirtualCamera
 	if virtualCamera == "" {
 		virtualCamera = DefaultVirtualCamera
+	}
+
+	if err := r.preflight.Verify(virtualCamera); err != nil {
+		return err
 	}
 
 	host, err := localIPv4(r.system)
