@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PhoneCam</string>
+    <string name="status_starting">PhoneCam — starting…</string>
+    <string name="status_permission_needed">PhoneCam — Camera permission needed</string>
+    <string name="status_preview_running">PhoneCam — Preview running</string>
+    <string name="status_error">PhoneCam — Error: %1$s</string>
+</resources>
