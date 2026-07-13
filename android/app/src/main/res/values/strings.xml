@@ -5,4 +5,9 @@
     <string name="status_permission_needed">PhoneCam — Camera permission needed</string>
     <string name="status_preview_running">PhoneCam — Preview running</string>
     <string name="status_error">PhoneCam — Error: %1$s</string>
+    <string name="status_scan_qr">Scan the QR from phonecam start</string>
+    <string name="status_pairing">Pairing with %1$s…</string>
+    <string name="status_waiting_approval">Waiting for approval on %1$s…</string>
+    <string name="status_paired">Paired with %1$s — RTP target %2$s</string>
+    <string name="status_failed">%1$s\n(tap to rescan)</string>
 </resources>
