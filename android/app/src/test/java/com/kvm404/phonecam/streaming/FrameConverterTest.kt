@@ -81,4 +81,64 @@ class FrameConverterTest {
         assertArrayEquals(byteArrayOf(20, 21), frame.u)
         assertArrayEquals(byteArrayOf(40, 41), frame.v)
     }
+
+    @Test
+    fun toFrameDataCenterCropsOversizedFrames() {
+        // Y: 8x4, tightly packed (rowStride 8), value = row*10 + col.
+        val y = ByteArray(8 * 4) { i -> ((i / 8) * 10 + (i % 8)).toByte() }
+        // Chroma: 4x2 planar (pixelStride 1, rowStride 4), value = 100 + row*10 + col (U), 50 more (V).
+        val u = ByteArray(4 * 2) { i -> (100 + (i / 4) * 10 + (i % 4)).toByte() }
+        val v = ByteArray(4 * 2) { i -> (50 + (i / 4) * 10 + (i % 4)).toByte() }
+
+        val frame = FrameConverter.toFrameData(
+            width = 8,
+            height = 4,
+            yBuffer = ByteBuffer.wrap(y),
+            yRowStride = 8,
+            yPixelStride = 1,
+            uBuffer = ByteBuffer.wrap(u),
+            uRowStride = 4,
+            uPixelStride = 1,
+            vBuffer = ByteBuffer.wrap(v),
+            vRowStride = 4,
+            vPixelStride = 1,
+            timestampUs = 42L,
+            targetWidth = 4,
+            targetHeight = 2,
+        )
+
+        assertEquals(4, frame.width)
+        assertEquals(2, frame.height)
+        // Even-rounded offsets: top = ((4-2)/2) rounded down to even = 0, left = ((8-4)/2) = 2.
+        assertArrayEquals(byteArrayOf(2, 3, 4, 5, 12, 13, 14, 15), frame.y)
+        // Chroma: 2x1 from offsets top/2 = 0, left/2 = 1.
+        assertArrayEquals(byteArrayOf(101, 102), frame.u)
+        assertArrayEquals(byteArrayOf(51, 52), frame.v)
+    }
+
+    @Test
+    fun toFrameDataRejectsUndersizedFrames() {
+        val buf = ByteBuffer.wrap(ByteArray(64))
+        try {
+            FrameConverter.toFrameData(
+                width = 4,
+                height = 4,
+                yBuffer = buf,
+                yRowStride = 4,
+                yPixelStride = 1,
+                uBuffer = buf,
+                uRowStride = 2,
+                uPixelStride = 1,
+                vBuffer = buf,
+                vRowStride = 2,
+                vPixelStride = 1,
+                timestampUs = 0L,
+                targetWidth = 8,
+                targetHeight = 8,
+            )
+            org.junit.Assert.fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            org.junit.Assert.assertTrue(e.message!!.contains("smaller than encoder target"))
+        }
+    }
 }

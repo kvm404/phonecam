@@ -30,6 +30,7 @@ import com.kvm404.phonecam.pairing.PairingPayload
 import com.kvm404.phonecam.pairing.PairingState
 import com.kvm404.phonecam.pairing.PhoneIdentity
 import com.kvm404.phonecam.pairing.RtpIdentity
+import com.kvm404.phonecam.pairing.VideoProfile
 import com.kvm404.phonecam.streaming.FrameConverter
 import com.kvm404.phonecam.streaming.RtpPacketizer
 import com.kvm404.phonecam.streaming.UdpRtpSender
@@ -64,6 +65,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Live H.264 encoder while streaming; null when idle or scanning. */
     private var videoEncoder: VideoEncoder? = null
+
+    /** Encoder target profile; camera frames are center-cropped to this during streaming. */
+    private var streamingProfile: VideoProfile? = null
 
     /** Guards so only the first successfully-parsed payload triggers pairing. */
     @Volatile
@@ -225,6 +229,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         videoEncoder = encoder
+        streamingProfile = payload.video
         encoder.start()
 
         imageAnalysis?.setAnalyzer(analysisExecutor, ::analyzeForStreaming)
@@ -254,8 +259,17 @@ class MainActivity : AppCompatActivity() {
                 vRowStride = planes[2].rowStride,
                 vPixelStride = planes[2].pixelStride,
                 timestampUs = imageProxy.imageInfo.timestamp / 1000,
+                targetWidth = streamingProfile?.width ?: 0,
+                targetHeight = streamingProfile?.height ?: 0,
             )
             videoEncoder?.encode(frame)
+        } catch (e: IllegalArgumentException) {
+            // Unrecoverable geometry problem (frame smaller than the encoder target):
+            // surface it instead of silently dropping every frame.
+            runOnUiThread {
+                binding.statusText.text =
+                    getString(R.string.status_error, e.message ?: e.toString())
+            }
         } catch (_: Exception) {
             // Drop this frame; a transient conversion/encode error must not stop the stream.
         } finally {
@@ -267,6 +281,7 @@ class MainActivity : AppCompatActivity() {
     private fun stopStreaming() {
         videoEncoder?.stop()
         videoEncoder = null
+        streamingProfile = null
         rtpIdentity?.close()
         rtpIdentity = null
     }
