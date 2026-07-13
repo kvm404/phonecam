@@ -11,8 +11,11 @@ import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import android.util.Size
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -27,10 +30,15 @@ import com.kvm404.phonecam.pairing.PairingPayload
 import com.kvm404.phonecam.pairing.PairingState
 import com.kvm404.phonecam.pairing.PhoneIdentity
 import com.kvm404.phonecam.pairing.RtpIdentity
+import com.kvm404.phonecam.streaming.FrameConverter
+import com.kvm404.phonecam.streaming.RtpPacketizer
+import com.kvm404.phonecam.streaming.UdpRtpSender
+import com.kvm404.phonecam.streaming.VideoEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.InetSocketAddress
 import java.util.UUID
 import java.util.concurrent.Executors
 
@@ -50,6 +58,12 @@ class MainActivity : AppCompatActivity() {
 
     private var imageAnalysis: ImageAnalysis? = null
     private var pairingJob: Job? = null
+
+    /** RTP identity (SSRC + open source socket) committed during the current pairing. */
+    private var rtpIdentity: RtpIdentity? = null
+
+    /** Live H.264 encoder while streaming; null when idle or scanning. */
+    private var videoEncoder: VideoEncoder? = null
 
     /** Guards so only the first successfully-parsed payload triggers pairing. */
     @Volatile
@@ -98,8 +112,17 @@ class MainActivity : AppCompatActivity() {
                 val preview = Preview.Builder().build().also {
                     it.surfaceProvider = binding.previewView.surfaceProvider
                 }
+                val resolutionSelector = ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            Size(1280, 720),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                        )
+                    )
+                    .build()
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setResolutionSelector(resolutionSelector)
                     .build()
                     .also { it.setAnalyzer(analysisExecutor, ::analyze) }
                 imageAnalysis = analysis
@@ -152,6 +175,7 @@ class MainActivity : AppCompatActivity() {
         pairingJob?.cancel()
         pairingJob = lifecycleScope.launch {
             val rtp = withContext(Dispatchers.IO) { RtpIdentity.create() }
+            rtpIdentity = rtp
             val controller = PairingController(HttpControlClient(), phoneIdentity, rtp)
             launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -163,15 +187,88 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render(state: PairingState, payload: PairingPayload) {
-        binding.statusText.text = when (state) {
-            PairingState.Idle -> getString(R.string.status_scan_qr)
-            PairingState.Pairing -> getString(R.string.status_pairing, payload.name)
+        when (state) {
+            PairingState.Idle -> binding.statusText.text = getString(R.string.status_scan_qr)
+            PairingState.Pairing ->
+                binding.statusText.text = getString(R.string.status_pairing, payload.name)
             PairingState.WaitingApproval ->
-                getString(R.string.status_waiting_approval, payload.name)
-            is PairingState.Paired ->
-                getString(R.string.status_paired, state.payload.name, state.payload.rtp)
-            is PairingState.Failed -> getString(R.string.status_failed, state.message)
+                binding.statusText.text =
+                    getString(R.string.status_waiting_approval, payload.name)
+            is PairingState.Paired -> startStreaming(state.payload)
+            is PairingState.Failed ->
+                binding.statusText.text = getString(R.string.status_failed, state.message)
         }
+    }
+
+    /**
+     * Once paired, swap the QR analyzer for the streaming analyzer and start the H.264
+     * encoder, sending RTP from the pairing-committed socket + SSRC to the payload's RTP
+     * endpoint at its video profile. Idempotent: subsequent Paired emissions are ignored.
+     */
+    private fun startStreaming(payload: PairingPayload) {
+        if (videoEncoder != null) return
+        val rtp = rtpIdentity
+        val socket = rtp?.socket
+        if (rtp == null || socket == null) {
+            binding.statusText.text =
+                getString(R.string.status_error, "missing RTP socket")
+            return
+        }
+
+        val target = InetSocketAddress(payload.rtpHost, payload.rtpPort)
+        val sender = UdpRtpSender(socket, target)
+        val packetizer = RtpPacketizer(rtp.ssrc, RtpPacketizer.randomInitialSequenceNumber())
+        val encoder = VideoEncoder(payload.video, packetizer, sender) { error ->
+            runOnUiThread {
+                binding.statusText.text =
+                    getString(R.string.status_error, error.localizedMessage ?: error.toString())
+            }
+        }
+        videoEncoder = encoder
+        encoder.start()
+
+        imageAnalysis?.setAnalyzer(analysisExecutor, ::analyzeForStreaming)
+        binding.statusText.text = getString(
+            R.string.status_streaming,
+            "${payload.rtpHost}:${payload.rtpPort}",
+            payload.video.width,
+            payload.video.height,
+            payload.video.fps,
+        )
+    }
+
+    /** Streaming-mode analyzer: convert the frame and hand it to the encoder, then close. */
+    private fun analyzeForStreaming(imageProxy: ImageProxy) {
+        try {
+            val planes = imageProxy.planes
+            val frame = FrameConverter.toFrameData(
+                width = imageProxy.width,
+                height = imageProxy.height,
+                yBuffer = planes[0].buffer,
+                yRowStride = planes[0].rowStride,
+                yPixelStride = planes[0].pixelStride,
+                uBuffer = planes[1].buffer,
+                uRowStride = planes[1].rowStride,
+                uPixelStride = planes[1].pixelStride,
+                vBuffer = planes[2].buffer,
+                vRowStride = planes[2].rowStride,
+                vPixelStride = planes[2].pixelStride,
+                timestampUs = imageProxy.imageInfo.timestamp / 1000,
+            )
+            videoEncoder?.encode(frame)
+        } catch (_: Exception) {
+            // Drop this frame; a transient conversion/encode error must not stop the stream.
+        } finally {
+            imageProxy.close()
+        }
+    }
+
+    /** Stop and release the encoder and the pairing socket, if any. */
+    private fun stopStreaming() {
+        videoEncoder?.stop()
+        videoEncoder = null
+        rtpIdentity?.close()
+        rtpIdentity = null
     }
 
     /** Cancel any in-flight pairing and resume QR scanning. Driven by tapping the status text. */
@@ -179,6 +276,7 @@ class MainActivity : AppCompatActivity() {
         pairingJob?.cancel()
         pairingJob = null
         handledPayload = false
+        stopStreaming()
         imageAnalysis?.setAnalyzer(analysisExecutor, ::analyze)
         binding.statusText.text = getString(R.string.status_scan_qr)
     }
@@ -186,6 +284,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         pairingJob?.cancel()
+        stopStreaming()
         imageAnalysis?.clearAnalyzer()
         analysisExecutor.shutdown()
         barcodeScanner.close()

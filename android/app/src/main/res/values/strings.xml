@@ -9,5 +9,6 @@
     <string name="status_pairing">Pairing with %1$s…</string>
     <string name="status_waiting_approval">Waiting for approval on %1$s…</string>
     <string name="status_paired">Paired with %1$s — RTP target %2$s</string>
+    <string name="status_streaming">Streaming to %1$s (%2$dx%3$d@%4$d)</string>
     <string name="status_failed">%1$s\n(tap to rescan)</string>
 </resources>
