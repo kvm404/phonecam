@@ -23,7 +23,7 @@ func TestPipelineArgsBuildsV0Pipeline(t *testing.T) {
 		"h264parse",
 		"avdec_h264",
 		"videoconvert",
-		"video/x-raw,format=YUY2,width=1280,height=720,framerate=30/1",
+		"video/x-raw,format=YUY2,width=1280,height=720",
 		"v4l2sink",
 		"device=/dev/video10",
 		"sync=false",
@@ -54,7 +54,7 @@ func TestPipelineArgsUsesOverrides(t *testing.T) {
 		"port=5000",
 		"payload=97",
 		"latency=5",
-		"video/x-raw,format=YUY2,width=640,height=360,framerate=15/1",
+		"video/x-raw,format=YUY2,width=640,height=360",
 		"device=/dev/video42",
 	} {
 		if !strings.Contains(joined, expected) {

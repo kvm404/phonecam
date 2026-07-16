@@ -89,11 +89,13 @@ func PipelineArgs(config Config) ([]string, error) {
 		config.PayloadType,
 		config.ClockRate,
 	)
+	// Framerate is intentionally not pinned: phone MediaCodec H.264 streams often
+	// carry no VUI timing info, so the decoder reports an unknown framerate and a
+	// framerate-pinned capsfilter fails negotiation ("not-negotiated").
 	rawCaps := fmt.Sprintf(
-		"video/x-raw,format=YUY2,width=%d,height=%d,framerate=%d/1",
+		"video/x-raw,format=YUY2,width=%d,height=%d",
 		config.Width,
 		config.Height,
-		config.FPS,
 	)
 
 	return []string{
