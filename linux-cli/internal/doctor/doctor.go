@@ -94,7 +94,7 @@ func Run(sys System) Report {
 
 	checks = append(checks, desktopSessionCheck(sys))
 	checks = append(checks, distroCheck(sys))
-	checks = append(checks, firewallGuidanceCheck())
+	checks = append(checks, firewallCheck(sys))
 	checks = append(checks, appVisibilityGuidanceCheck())
 	checks = append(checks, Check{
 		Name:    "LAN privacy",
@@ -273,11 +273,31 @@ func distroCheck(sys System) Check {
 	}
 }
 
-func firewallGuidanceCheck() Check {
+// firewallCheck detects a common active host firewall (ufw or firewalld) and,
+// if found, warns that it may block PhoneCam's fixed control (TCP 47470) and
+// RTP (UDP 47471) ports, with a distro-appropriate allow command. It is
+// best-effort and never fails the report.
+func firewallCheck(sys System) Check {
+	if sys.RunCommand("systemctl", "is-active", "--quiet", "ufw") == nil {
+		return Check{
+			Name:    "Firewall",
+			Status:  StatusWarn,
+			Message: "ufw is active and may block PhoneCam's control (TCP 47470) and RTP (UDP 47471) ports",
+			Fix:     "Allow PhoneCam through: sudo ufw allow 47470/tcp && sudo ufw allow 47471/udp",
+		}
+	}
+	if sys.RunCommand("systemctl", "is-active", "--quiet", "firewalld") == nil {
+		return Check{
+			Name:    "Firewall",
+			Status:  StatusWarn,
+			Message: "firewalld is active and may block PhoneCam's control (TCP 47470) and RTP (UDP 47471) ports",
+			Fix:     "Allow PhoneCam through: sudo firewall-cmd --permanent --add-port=47470/tcp --add-port=47471/udp && sudo firewall-cmd --reload",
+		}
+	}
 	return Check{
 		Name:    "Firewall",
 		Status:  StatusInfo,
-		Message: "PhoneCam needs local TCP control and UDP RTP ports reachable from the Android phone",
+		Message: "no active ufw or firewalld detected; PhoneCam needs local TCP control and UDP RTP ports reachable from the Android phone",
 		Fix:     "If pairing or streaming fails, allow PhoneCam on your trusted LAN firewall profile.",
 	}
 }

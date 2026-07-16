@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -74,14 +75,7 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 		}
 		return 0
 	case "start":
-		runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		err := start.New(start.OSSystem{}, nil, nil).Run(runCtx, start.Config{VirtualCamera: start.DefaultVirtualCamera}, stdout)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintf(stderr, "phonecam start failed: %v\n", err)
-			return 1
-		}
-		return 0
+		return runStart(ctx, args[1:], stdout, stderr)
 	case "smoke":
 		runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -107,6 +101,54 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 	}
 }
 
+func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	controlPort, rtpPort, code, ok := parseStartFlags(args, stderr)
+	if !ok {
+		return code
+	}
+
+	runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err := start.New(start.OSSystem{}, nil, nil).Run(runCtx, start.Config{
+		VirtualCamera: start.DefaultVirtualCamera,
+		ControlPort:   controlPort,
+		RTPPort:       rtpPort,
+	}, stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(stderr, "phonecam start failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// parseStartFlags parses the flags for `phonecam start`. It returns the
+// resolved ports; ok is false when the caller should exit with the returned
+// code (2 on an unknown/invalid flag, 0 on -h/--help).
+func parseStartFlags(args []string, stderr io.Writer) (controlPort, rtpPort, code int, ok bool) {
+	fs := flag.NewFlagSet("start", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprint(stderr, `Usage: phonecam start [flags]
+
+Start pairing and the Linux receiver.
+
+Flags:
+  --control-port int   TCP control port (0 = ephemeral/random) (default 47470)
+  --rtp-port int       UDP RTP port (0 = ephemeral/random) (default 47471)
+`)
+	}
+	control := fs.Int("control-port", start.DefaultControlPort, "TCP control port (0 = ephemeral/random)")
+	rtp := fs.Int("rtp-port", start.DefaultRTPPort, "UDP RTP port (0 = ephemeral/random)")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0, 0, 0, false
+		}
+		return 0, 0, 2, false
+	}
+	return *control, *rtp, 0, true
+}
+
 func printHelp(w io.Writer) {
 	fmt.Fprint(w, `PhoneCam
 
@@ -115,6 +157,7 @@ Usage:
 
 Commands:
   start      Start pairing and the Linux receiver
+             (flags: --control-port [47470], --rtp-port [47471]; 0 = random)
   smoke      Run a local RTP loopback self-test
   status     Show receiver and stream status
   stop       Stop the receiver
@@ -147,6 +190,14 @@ func printInstall(sys doctor.System, w io.Writer) {
 	fmt.Fprint(w, `
 After installing v4l2loopback, load a PhoneCam-compatible virtual camera:
   sudo modprobe v4l2loopback video_nr=10 card_label=PhoneCam exclusive_caps=1
+
+Make the virtual camera load automatically on every boot:
+  echo v4l2loopback | sudo tee /etc/modules-load.d/v4l2loopback.conf
+  echo "options v4l2loopback video_nr=10 card_label=PhoneCam exclusive_caps=1" | sudo tee /etc/modprobe.d/v4l2loopback.conf
+
+Allow PhoneCam through your firewall (fixed default ports 47470/tcp, 47471/udp):
+  ufw:       sudo ufw allow 47470/tcp && sudo ufw allow 47471/udp
+  firewalld: sudo firewall-cmd --permanent --add-port=47470/tcp --add-port=47471/udp && sudo firewall-cmd --reload
 `)
 }
 

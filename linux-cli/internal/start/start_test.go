@@ -489,6 +489,34 @@ func TestRunPreflightReceivesDefaultedDevice(t *testing.T) {
 	}
 }
 
+// listenErrSystem behaves like fakeSystem but fails to bind TCP listeners,
+// simulating a port already in use.
+type listenErrSystem struct {
+	fakeSystem
+}
+
+func (listenErrSystem) Listen(network, address string) (net.Listener, error) {
+	return nil, errors.New("address already in use")
+}
+
+func TestRunWrapsBusyControlPort(t *testing.T) {
+	sys := listenErrSystem{fakeSystem: testSystem()}
+	var out lockedBuffer
+	err := New(sys, &blockingReceiver{}, &fakePreflight{}).Run(context.Background(), Config{
+		VirtualCamera: "/dev/video10",
+		ControlPort:   DefaultControlPort,
+	}, &out)
+	if err == nil {
+		t.Fatal("expected error when control port is busy")
+	}
+	if !strings.Contains(err.Error(), "control port 47470 is busy") {
+		t.Fatalf("expected busy control port message, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "--control-port") {
+		t.Fatalf("expected error to mention --control-port flag, got %v", err)
+	}
+}
+
 func TestLocalIPv4FallsBackToLoopback(t *testing.T) {
 	got, err := localIPv4(fakeSystem{})
 	if err != nil {

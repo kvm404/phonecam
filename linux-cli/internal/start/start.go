@@ -20,6 +20,14 @@ import (
 
 const DefaultVirtualCamera = "/dev/video10"
 
+// DefaultControlPort and DefaultRTPPort are the fixed ports PhoneCam binds by
+// default so users can write static firewall allow rules. A value of 0 in
+// Config restores the previous ephemeral/random-port behavior.
+const (
+	DefaultControlPort = 47470
+	DefaultRTPPort     = 47471
+)
+
 // approvalPollInterval is how often the run loop checks whether the pairing
 // session has been approved before starting the receiver. It is a package-level
 // var so tests can shorten it.
@@ -117,6 +125,9 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 
 	controlListener, err := listenTCP(r.system, config.ControlPort)
 	if err != nil {
+		if config.ControlPort > 0 {
+			return fmt.Errorf("control port %d is busy (use --control-port to change): %w", config.ControlPort, err)
+		}
 		return err
 	}
 	defer controlListener.Close()
