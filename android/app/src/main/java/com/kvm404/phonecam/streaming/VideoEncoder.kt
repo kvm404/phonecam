@@ -4,6 +4,7 @@ import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Bundle
 import com.kvm404.phonecam.pairing.VideoProfile
 
 /**
@@ -29,6 +30,9 @@ class VideoEncoder(
 ) {
     private var codec: MediaCodec? = null
     private var outputThread: Thread? = null
+
+    /** Frames queued since the last forced keyframe; see the sync request in [encode]. */
+    private var framesSinceSyncRequest = 0
 
     @Volatile
     private var running = false
@@ -87,6 +91,21 @@ class VideoEncoder(
             fillImage(image, frame)
             val size = frame.width * frame.height * 3 / 2
             c.queueInputBuffer(index, 0, size, frame.timestampUs, 0)
+
+            // Vendor encoders don't reliably honour KEY_I_FRAME_INTERVAL, and after
+            // RTP packet loss the receiver stays frozen until the next keyframe.
+            // Force one every ~2 seconds so recovery is always fast.
+            framesSinceSyncRequest++
+            if (framesSinceSyncRequest >= profile.fps * SYNC_REQUEST_INTERVAL_SECONDS) {
+                framesSinceSyncRequest = 0
+                val params = Bundle()
+                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                try {
+                    c.setParameters(params)
+                } catch (_: IllegalStateException) {
+                    // Codec busy/released mid-flight: skip; next interval retries.
+                }
+            }
         } catch (t: Throwable) {
             running = false
             onError(t)
@@ -198,6 +217,7 @@ class VideoEncoder(
         private const val MIME = "video/avc"
         private const val DEFAULT_BIT_RATE = 4_000_000
         private const val I_FRAME_INTERVAL_SECONDS = 1
+        private const val SYNC_REQUEST_INTERVAL_SECONDS = 2
         private const val VBR_MODE = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
         private const val DEQUEUE_TIMEOUT_US = 10_000L
         private const val STOP_JOIN_MS = 500L
