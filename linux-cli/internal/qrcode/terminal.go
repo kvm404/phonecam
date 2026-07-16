@@ -7,14 +7,19 @@ import (
 	goqrcode "github.com/skip2/go-qrcode"
 )
 
-const quietZone = 2
+// quietZone is the extra terminal-only padding added around the QR symbol. The
+// go-qrcode Bitmap already embeds the QR-spec quiet zone (4 modules), so no
+// additional padding is needed for reliable short-range terminal scanning.
+const quietZone = 0
 
 func RenderTerminal(content string) (string, error) {
 	if content == "" {
 		return "", fmt.Errorf("qr content is empty")
 	}
 
-	code, err := goqrcode.New(content, goqrcode.Medium)
+	// Low error correction is sufficient for short-range, high-contrast
+	// terminal scanning and yields a smaller symbol (fewer modules).
+	code, err := goqrcode.New(content, goqrcode.Low)
 	if err != nil {
 		return "", err
 	}

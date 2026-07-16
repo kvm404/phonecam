@@ -184,6 +184,70 @@ func TestDoctorWarnsForUnknownDistro(t *testing.T) {
 	}
 }
 
+func findCheck(t *testing.T, report Report, name string) Check {
+	t.Helper()
+	for _, check := range report.Checks {
+		if check.Name == name {
+			return check
+		}
+	}
+	t.Fatalf("check %q not found in report", name)
+	return Check{}
+}
+
+func TestFirewallCheckWarnsWhenUFWActive(t *testing.T) {
+	// readySystem's RunCommand succeeds for everything, so `systemctl is-active
+	// --quiet ufw` reports active.
+	report := Run(readySystem(fakeSystem{}))
+	check := findCheck(t, report, "Firewall")
+	if check.Status != StatusWarn {
+		t.Fatalf("expected WARN for active ufw, got %s", check.Status)
+	}
+	if !strings.Contains(check.Message, "ufw is active") {
+		t.Fatalf("expected ufw message, got %q", check.Message)
+	}
+	if !strings.Contains(check.Fix, "sudo ufw allow 47470/tcp && sudo ufw allow 47471/udp") {
+		t.Fatalf("expected ufw allow fix, got %q", check.Fix)
+	}
+	if report.HasFailures() {
+		t.Fatal("firewall warning must not fail the report")
+	}
+}
+
+func TestFirewallCheckWarnsWhenFirewalldActive(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		commandFailures: map[string]bool{
+			"systemctl is-active --quiet ufw": true,
+		},
+	}))
+	check := findCheck(t, report, "Firewall")
+	if check.Status != StatusWarn {
+		t.Fatalf("expected WARN for active firewalld, got %s", check.Status)
+	}
+	if !strings.Contains(check.Message, "firewalld is active") {
+		t.Fatalf("expected firewalld message, got %q", check.Message)
+	}
+	if !strings.Contains(check.Fix, "firewall-cmd --permanent --add-port=47470/tcp --add-port=47471/udp") {
+		t.Fatalf("expected firewalld allow fix, got %q", check.Fix)
+	}
+}
+
+func TestFirewallCheckInfoWhenNoFirewall(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		commandFailures: map[string]bool{
+			"systemctl is-active --quiet ufw":       true,
+			"systemctl is-active --quiet firewalld": true,
+		},
+	}))
+	check := findCheck(t, report, "Firewall")
+	if check.Status != StatusInfo {
+		t.Fatalf("expected INFO when no firewall active, got %s", check.Status)
+	}
+	if !strings.Contains(check.Message, "no active ufw or firewalld") {
+		t.Fatalf("expected no-firewall message, got %q", check.Message)
+	}
+}
+
 func TestOSReleaseValueHandlesQuotes(t *testing.T) {
 	data := "ID=manjaro\nID_LIKE=\"arch linux\"\n"
 	if got := osReleaseValue(data, "ID_LIKE"); got != "arch linux" {
