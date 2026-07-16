@@ -1,6 +1,7 @@
 package start
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -92,6 +93,9 @@ type Config struct {
 	ControlPort   int
 	RTPPort       int
 	Now           time.Time
+	// AutoApprove approves the first phone to pair without prompting. It is
+	// intended for automation and headless use.
+	AutoApprove bool
 }
 
 type Runtime struct {
@@ -117,7 +121,7 @@ func New(system System, receiver Receiver, preflight Preflight, store SessionSto
 	return Runtime{system: system, receiver: receiver, preflight: preflight, store: store}
 }
 
-func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error {
+func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout io.Writer) error {
 	recvCtx, recvCancel := context.WithCancel(ctx)
 	defer recvCancel()
 
@@ -207,24 +211,82 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 
 	writeStartOutput(stdout, virtualCamera, pairSession)
 
+	shutdownServer := func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}
+
 	// Do not start the receiver until the phone has been approved. The phone
 	// reports its actual negotiated video profile during pairing, which we use
-	// to size the receiver pipeline.
+	// to size the receiver pipeline. Approval can arrive three ways: an
+	// interactive y/N answer on stdin, the HTTP /approve endpoint (used by
+	// automation), or automatically when AutoApprove is set.
 	ticker := time.NewTicker(approvalPollInterval)
 	defer ticker.Stop()
 
+	answerCh := make(chan string, 1)
+	var promptHandled bool
+
 	for !pairSession.IsApproved() {
+		// When the phone first consumes its token it becomes a pending phone
+		// awaiting approval. Handle that transition exactly once.
+		if !promptHandled {
+			if phone, ok := pairSession.PendingPhone(); ok {
+				promptHandled = true
+				if config.AutoApprove {
+					if err := pairSession.Approve(time.Now().UTC()); err != nil {
+						fmt.Fprintln(stdout, err)
+						shutdownServer()
+						pairSession.Invalidate()
+						return err
+					}
+					fmt.Fprintf(stdout, "Auto-approved phone %q.\n", phone.Name)
+					continue
+				}
+				fmt.Fprintf(stdout, "Phone %q wants to connect. Approve? [y/N] ", phone.Name)
+				if stdin != nil {
+					go func() {
+						line, _ := bufio.NewReader(stdin).ReadString('\n')
+						// answerCh is buffered (size 1) so this send never
+						// blocks even if Run has already returned, letting the
+						// goroutine exit instead of leaking.
+						answerCh <- line
+					}()
+				}
+			}
+		}
+
 		select {
 		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = server.Shutdown(shutdownCtx)
+			shutdownServer()
 			pairSession.Invalidate()
 			return ctx.Err()
 		case err := <-errCh:
 			pairSession.Invalidate()
 			return err
+		case answer := <-answerCh:
+			switch strings.ToLower(strings.TrimSpace(answer)) {
+			case "y", "yes":
+				if err := pairSession.Approve(time.Now().UTC()); err != nil {
+					fmt.Fprintln(stdout, err)
+					shutdownServer()
+					pairSession.Invalidate()
+					return err
+				}
+				// Approved: the loop condition now exits and start proceeds.
+			default:
+				fmt.Fprintln(stdout, "Pairing denied.")
+				pairSession.Invalidate()
+				shutdownServer()
+				return nil
+			}
 		case <-ticker.C:
+			// External approval via HTTP /approve while the prompt is pending.
+			// The prompt line has no trailing newline, so lead with one.
+			if pairSession.IsApproved() {
+				fmt.Fprintf(stdout, "\nApproved via control API.\n")
+			}
 		}
 	}
 
