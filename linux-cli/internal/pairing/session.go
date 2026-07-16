@@ -37,6 +37,14 @@ var (
 	ErrInvalidSessionID = errors.New("session id is empty")
 	ErrInvalidated      = errors.New("session is invalidated")
 	ErrNoPendingPhone   = errors.New("no pending phone approval")
+	ErrInvalidVideo     = errors.New("invalid video profile")
+)
+
+const (
+	MinVideoDimension = 16
+	MaxVideoDimension = 4096
+	MinVideoFPS       = 1
+	MaxVideoFPS       = 120
 )
 
 type Config struct {
@@ -81,6 +89,9 @@ type TokenRequest struct {
 	ControlIP net.IP
 	RTPPort   int
 	SSRC      uint32
+	// Video is the phone's actual negotiated output profile. Nil means the
+	// phone did not report one and the session's advertised profile applies.
+	Video *VideoProfile
 }
 
 type RTPSource struct {
@@ -99,6 +110,7 @@ type Session struct {
 	pendingSource RTPSource
 	approvedPhone Phone
 	rtpSource     *RTPSource
+	negotiated    *VideoProfile
 }
 
 func New(config Config) (*Session, error) {
@@ -201,12 +213,21 @@ func (s *Session) ConsumeToken(request TokenRequest, now time.Time) error {
 	if request.SSRC == 0 {
 		return ErrInvalidSSRC
 	}
+	if request.Video != nil {
+		if err := validateVideoProfile(*request.Video); err != nil {
+			return err
+		}
+	}
 	s.consumed = true
 	s.pendingPhone = request.Phone
 	s.pendingSource = RTPSource{
 		IP:   append(net.IP(nil), request.ControlIP...),
 		Port: request.RTPPort,
 		SSRC: request.SSRC,
+	}
+	if request.Video != nil {
+		video := *request.Video
+		s.negotiated = &video
 	}
 	return nil
 }
@@ -244,6 +265,18 @@ func (s *Session) ApprovedPhone() Phone {
 	defer s.mu.RUnlock()
 
 	return s.approvedPhone
+}
+
+// NegotiatedVideo returns the phone-reported video profile if one was stored
+// during token consumption, otherwise the session's advertised profile.
+func (s *Session) NegotiatedVideo() VideoProfile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.negotiated != nil {
+		return *s.negotiated
+	}
+	return s.payload.Video
 }
 
 func (s *Session) Invalidate() {
@@ -302,6 +335,19 @@ func (s *Session) ValidateRTPSource(source RTPSource) error {
 
 func (s *Session) isExpiredLocked(now time.Time) bool {
 	return !now.Before(s.payload.Expires)
+}
+
+func validateVideoProfile(video VideoProfile) error {
+	if video.Width < MinVideoDimension || video.Width > MaxVideoDimension {
+		return ErrInvalidVideo
+	}
+	if video.Height < MinVideoDimension || video.Height > MaxVideoDimension {
+		return ErrInvalidVideo
+	}
+	if video.FPS < MinVideoFPS || video.FPS > MaxVideoFPS {
+		return ErrInvalidVideo
+	}
+	return nil
 }
 
 func valueOrDefault(value, fallback int) int {

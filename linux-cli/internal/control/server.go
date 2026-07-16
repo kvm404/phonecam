@@ -34,11 +34,12 @@ type Config struct {
 }
 
 type pairRequest struct {
-	SessionID string        `json:"session"`
-	Token     string        `json:"token"`
-	Phone     pairing.Phone `json:"phone"`
-	RTPPort   int           `json:"rtp_port"`
-	SSRC      uint32        `json:"ssrc"`
+	SessionID string                `json:"session"`
+	Token     string                `json:"token"`
+	Phone     pairing.Phone         `json:"phone"`
+	RTPPort   int                   `json:"rtp_port"`
+	SSRC      uint32                `json:"ssrc"`
+	Video     *pairing.VideoProfile `json:"video"`
 }
 
 type approveRequest struct {
@@ -123,6 +124,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		ControlIP: remoteIP,
 		RTPPort:   request.RTPPort,
 		SSRC:      request.SSRC,
+		Video:     request.Video,
 	}, s.clock.Now())
 	if err != nil {
 		writePairingError(w, err)
@@ -200,6 +202,7 @@ func writePairingError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusGone, err.Error())
 	case errors.Is(err, pairing.ErrInvalidEndpoint),
 		errors.Is(err, pairing.ErrInvalidSSRC),
+		errors.Is(err, pairing.ErrInvalidVideo),
 		errors.Is(err, pairing.ErrNoPendingPhone):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
