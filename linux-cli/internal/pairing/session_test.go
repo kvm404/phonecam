@@ -195,6 +195,63 @@ func TestInvalidateRejectsFutureSessionUse(t *testing.T) {
 	}
 }
 
+func TestConsumeTokenStoresNegotiatedVideo(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	request := tokenRequest(session, session.Payload().Token)
+	request.Video = &VideoProfile{Width: 720, Height: 1280, FPS: 24}
+	if err := session.ConsumeToken(request, now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+
+	if got := session.NegotiatedVideo(); got != (VideoProfile{Width: 720, Height: 1280, FPS: 24}) {
+		t.Fatalf("expected stored negotiated video, got %#v", got)
+	}
+}
+
+func TestNegotiatedVideoFallsBackToAdvertisedProfile(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	if got := session.NegotiatedVideo(); got != (VideoProfile{Width: 1280, Height: 720, FPS: 30}) {
+		t.Fatalf("expected advertised profile before consumption, got %#v", got)
+	}
+
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	if got := session.NegotiatedVideo(); got != (VideoProfile{Width: 1280, Height: 720, FPS: 30}) {
+		t.Fatalf("expected advertised profile fallback, got %#v", got)
+	}
+}
+
+func TestConsumeTokenRejectsInvalidVideo(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	tests := []VideoProfile{
+		{Width: 0, Height: 720, FPS: 30},
+		{Width: 8, Height: 720, FPS: 30},
+		{Width: 5000, Height: 720, FPS: 30},
+		{Width: 1280, Height: 0, FPS: 30},
+		{Width: 1280, Height: 5000, FPS: 30},
+		{Width: 1280, Height: 720, FPS: 0},
+		{Width: 1280, Height: 720, FPS: 121},
+	}
+
+	for _, video := range tests {
+		session := newTestSession(t, Config{Now: now})
+		request := tokenRequest(session, session.Payload().Token)
+		v := video
+		request.Video = &v
+		if err := session.ConsumeToken(request, now.Add(time.Second)); !errors.Is(err, ErrInvalidVideo) {
+			t.Fatalf("expected invalid video error for %#v, got %v", video, err)
+		}
+		if session.NegotiatedVideo() != (VideoProfile{Width: 1280, Height: 720, FPS: 30}) {
+			t.Fatalf("expected no negotiated video stored on rejection for %#v", video)
+		}
+	}
+}
+
 func TestNewRejectsInvalidEndpoint(t *testing.T) {
 	tests := []Config{
 		{ControlURL: "not a url", RTPHost: "127.0.0.1", RTPPort: 49322},

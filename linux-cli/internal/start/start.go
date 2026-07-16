@@ -20,6 +20,11 @@ import (
 
 const DefaultVirtualCamera = "/dev/video10"
 
+// approvalPollInterval is how often the run loop checks whether the pairing
+// session has been approved before starting the receiver. It is a package-level
+// var so tests can shorten it.
+var approvalPollInterval = 200 * time.Millisecond
+
 type System interface {
 	Hostname() (string, error)
 	Interfaces() ([]net.Interface, error)
@@ -160,12 +165,42 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 		errCh <- nil
 	}()
 
+	writeStartOutput(stdout, virtualCamera, session)
+
+	// Do not start the receiver until the phone has been approved. The phone
+	// reports its actual negotiated video profile during pairing, which we use
+	// to size the receiver pipeline.
+	ticker := time.NewTicker(approvalPollInterval)
+	defer ticker.Stop()
+
+	for !session.IsApproved() {
+		select {
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = server.Shutdown(shutdownCtx)
+			session.Invalidate()
+			return ctx.Err()
+		case err := <-errCh:
+			session.Invalidate()
+			return err
+		case <-ticker.C:
+		}
+	}
+
+	video := session.NegotiatedVideo()
+	fmt.Fprintf(stdout, "Phone connected: receiving %dx%d@%d video\n", video.Width, video.Height, video.FPS)
+
 	receiverErr := make(chan error, 1)
 	go func() {
-		receiverErr <- r.receiver.Run(recvCtx, gstreamer.Config{RTPPort: rtpPort, Device: virtualCamera})
+		receiverErr <- r.receiver.Run(recvCtx, gstreamer.Config{
+			RTPPort: rtpPort,
+			Device:  virtualCamera,
+			Width:   video.Width,
+			Height:  video.Height,
+			FPS:     video.FPS,
+		})
 	}()
-
-	writeStartOutput(stdout, virtualCamera, session)
 
 	select {
 	case <-ctx.Done():

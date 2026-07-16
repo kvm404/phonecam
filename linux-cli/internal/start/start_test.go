@@ -1,16 +1,126 @@
 package start
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/gstreamer"
+	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
 )
+
+func init() {
+	// Shorten the approval poll so tests that gate the receiver on approval do
+	// not spend real time in the wait loop.
+	approvalPollInterval = 5 * time.Millisecond
+}
+
+// waitForPayload polls the run output until the pairing payload block has been
+// written and returns the parsed payload.
+func waitForPayload(t *testing.T, out *lockedBuffer) pairing.Payload {
+	t.Helper()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if payload, ok := parsePayload(out.String()); ok {
+			return payload
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("pairing payload was not written:\n%s", out.String())
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+func parsePayload(output string) (pairing.Payload, bool) {
+	const marker = "Pairing payload:\n"
+	idx := strings.Index(output, marker)
+	if idx < 0 {
+		return pairing.Payload{}, false
+	}
+	decoder := json.NewDecoder(strings.NewReader(output[idx+len(marker):]))
+	var payload pairing.Payload
+	if err := decoder.Decode(&payload); err != nil {
+		return pairing.Payload{}, false
+	}
+	if payload.SessionID == "" || payload.Token == "" {
+		return pairing.Payload{}, false
+	}
+	return payload, true
+}
+
+// approveViaHTTP performs the /pair (optionally reporting video) and /approve
+// handshake against the control server the payload advertises. The listener is
+// bound to loopback in tests, so /approve's loopback check is satisfied.
+func approveViaHTTP(t *testing.T, payload pairing.Payload, video *pairing.VideoProfile) {
+	t.Helper()
+
+	parsed, err := url.Parse(payload.Control)
+	if err != nil {
+		t.Fatalf("parse control url %q: %v", payload.Control, err)
+	}
+	base := "http://127.0.0.1:" + parsed.Port()
+
+	pairBody := map[string]any{
+		"session":  payload.SessionID,
+		"token":    payload.Token,
+		"phone":    map[string]string{"id": "phone-1", "name": "Pixel"},
+		"rtp_port": 50000,
+		"ssrc":     1234,
+	}
+	if video != nil {
+		pairBody["video"] = video
+	}
+	if code := postJSONHTTP(t, base+"/pair", pairBody); code != http.StatusAccepted {
+		t.Fatalf("expected pair 202, got %d", code)
+	}
+	if code := postJSONHTTP(t, base+"/approve", map[string]any{"session": payload.SessionID}); code != http.StatusOK {
+		t.Fatalf("expected approve 200, got %d", code)
+	}
+}
+
+func postJSONHTTP(t *testing.T, target string, body any) int {
+	t.Helper()
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	resp, err := http.Post(target, "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("post %s: %v", target, err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// waitForReceiver blocks until the blocking receiver has recorded its config.
+func waitForReceiver(t *testing.T, r *blockingReceiver) gstreamer.Config {
+	t.Helper()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if config, got := r.receivedConfig(); got {
+			return config
+		}
+		select {
+		case <-deadline:
+			t.Fatal("receiver did not start")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
 
 type fakeSystem struct {
 	hostname   string
@@ -135,35 +245,27 @@ func TestRunPrintsPairingPayloadAndStopsOnContextCancel(t *testing.T) {
 		done <- New(system, receiver, &fakePreflight{}).Run(ctx, Config{
 			VirtualCamera: "/dev/video10",
 			RTPPort:       50123,
-			Now:           time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC),
 		}, &out)
 	}()
 
-	deadline := time.After(2 * time.Second)
-	for !strings.Contains(out.String(), "Status: Waiting for phone") {
-		select {
-		case <-deadline:
-			t.Fatalf("start output was not written:\n%s", out.String())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	payload := waitForPayload(t, &out)
+	approveViaHTTP(t, payload, nil)
+
+	config := waitForReceiver(t, receiver)
+	if config.RTPPort != 50123 {
+		t.Fatalf("expected receiver RTP port 50123, got %d", config.RTPPort)
+	}
+	if config.Device != "/dev/video10" {
+		t.Fatalf("expected receiver device /dev/video10, got %q", config.Device)
+	}
+	if config.Width != 1280 || config.Height != 720 || config.FPS != 30 {
+		t.Fatalf("expected advertised dimensions 1280x720@30, got %dx%d@%d", config.Width, config.Height, config.FPS)
 	}
 
 	cancel()
 	err := <-done
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context canceled, got %v", err)
-	}
-
-	config, got := receiver.receivedConfig()
-	if !got {
-		t.Fatal("expected receiver to be started")
-	}
-	if config.RTPPort != 50123 {
-		t.Fatalf("expected receiver RTP port 50123, got %d", config.RTPPort)
-	}
-	if config.Device != "/dev/video10" {
-		t.Fatalf("expected receiver device /dev/video10, got %q", config.Device)
 	}
 
 	output := out.String()
@@ -176,6 +278,7 @@ func TestRunPrintsPairingPayloadAndStopsOnContextCancel(t *testing.T) {
 		"Pairing payload:",
 		`"transport": "rtp-h264"`,
 		`"width": 1280`,
+		"Phone connected: receiving 1280x720@30 video",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
@@ -226,27 +329,16 @@ func TestRunDefaultsVirtualCameraAndPassesItToReceiver(t *testing.T) {
 				}, &out)
 			}()
 
-			deadline := time.After(2 * time.Second)
-			for !strings.Contains(out.String(), "Status: Waiting for phone") {
-				select {
-				case <-deadline:
-					cancel()
-					<-done
-					t.Fatalf("start output was not written:\n%s", out.String())
-				default:
-					time.Sleep(10 * time.Millisecond)
-				}
-			}
+			payload := waitForPayload(t, &out)
+			approveViaHTTP(t, payload, nil)
+
+			config := waitForReceiver(t, receiver)
 
 			cancel()
 			if err := <-done; !errors.Is(err, context.Canceled) {
 				t.Fatalf("expected context canceled, got %v", err)
 			}
 
-			config, got := receiver.receivedConfig()
-			if !got {
-				t.Fatal("expected receiver to be started")
-			}
 			if config.Device != tc.wantDevice {
 				t.Fatalf("expected receiver device %q, got %q", tc.wantDevice, config.Device)
 			}
@@ -263,8 +355,14 @@ func TestRunDefaultsVirtualCameraAndPassesItToReceiver(t *testing.T) {
 func TestRunReturnsReceiverError(t *testing.T) {
 	receiver := resultReceiver{err: errors.New("boom")}
 	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}).Run(context.Background(), Config{}, &out)
+	}()
 
-	err := New(testSystem(), receiver, &fakePreflight{}).Run(context.Background(), Config{}, &out)
+	approveViaHTTP(t, waitForPayload(t, &out), nil)
+
+	err := <-done
 	if err == nil {
 		t.Fatal("expected error from receiver failure")
 	}
@@ -276,10 +374,73 @@ func TestRunReturnsReceiverError(t *testing.T) {
 func TestRunReturnsErrorWhenReceiverExitsCleanly(t *testing.T) {
 	receiver := resultReceiver{err: nil}
 	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}).Run(context.Background(), Config{}, &out)
+	}()
 
-	err := New(testSystem(), receiver, &fakePreflight{}).Run(context.Background(), Config{}, &out)
+	approveViaHTTP(t, waitForPayload(t, &out), nil)
+
+	err := <-done
 	if err == nil || !strings.Contains(err.Error(), "exited unexpectedly") {
 		t.Fatalf("expected exited unexpectedly error, got %v", err)
+	}
+}
+
+func TestRunStartsReceiverWithNegotiatedDimensions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+			RTPPort:       50200,
+		}, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	approveViaHTTP(t, payload, &pairing.VideoProfile{Width: 720, Height: 1280, FPS: 24})
+
+	config := waitForReceiver(t, receiver)
+	if config.Width != 720 || config.Height != 1280 || config.FPS != 24 {
+		t.Fatalf("expected negotiated dimensions 720x1280@24, got %dx%d@%d", config.Width, config.Height, config.FPS)
+	}
+	if !strings.Contains(out.String(), "Phone connected: receiving 720x1280@24 video") {
+		t.Fatalf("expected phone-connected line, got:\n%s", out.String())
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRunNeverStartsReceiverWhenCancelledBeforeApproval(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+		}, &out)
+	}()
+
+	// Wait until the server is up and pairing has been advertised, but never
+	// approve the session.
+	waitForPayload(t, &out)
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+
+	if _, started := receiver.receivedConfig(); started {
+		t.Fatal("expected receiver not to start before approval")
+	}
+	if strings.Contains(out.String(), "Phone connected") {
+		t.Fatalf("expected no phone-connected line, got:\n%s", out.String())
 	}
 }
 

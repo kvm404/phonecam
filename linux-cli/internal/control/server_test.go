@@ -86,6 +86,65 @@ func TestPairConsumesTokenAndWaitsForApproval(t *testing.T) {
 	}
 }
 
+func TestPairStoresNegotiatedVideo(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{Session: session, Clock: fakeClock{now: now.Add(time.Second)}}).Handler()
+
+	recorder := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+		Video:     &pairing.VideoProfile{Width: 720, Height: 1280, FPS: 24},
+	})
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := session.NegotiatedVideo(); got != (pairing.VideoProfile{Width: 720, Height: 1280, FPS: 24}) {
+		t.Fatalf("expected stored negotiated video, got %#v", got)
+	}
+}
+
+func TestPairWithoutVideoUsesAdvertisedProfile(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{Session: session, Clock: fakeClock{now: now.Add(time.Second)}}).Handler()
+
+	recorder := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := session.NegotiatedVideo(); got != (pairing.VideoProfile{Width: 1280, Height: 720, FPS: 30}) {
+		t.Fatalf("expected advertised profile fallback, got %#v", got)
+	}
+}
+
+func TestPairRejectsInvalidVideo(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{Session: session, Clock: fakeClock{now: now.Add(time.Second)}}).Handler()
+
+	recorder := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+		Video:     &pairing.VideoProfile{Width: 720, Height: 1280, FPS: 999},
+	})
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestPairRejectsWrongToken(t *testing.T) {
 	session, now := newTestSession(t)
 	server := New(Config{Session: session, Clock: fakeClock{now: now.Add(time.Second)}}).Handler()
