@@ -116,6 +116,123 @@ class FrameConverterTest {
         assertArrayEquals(byteArrayOf(51, 52), frame.v)
     }
 
+    // ---- rotation ----
+
+    /**
+     * Build a FrameData whose Y plane is [w]x[h] with value = row*10+col, and 2x-smaller
+     * chroma planes with distinct value bases (u from 40, v from 80) so cross-plane bugs are
+     * visible and every value stays inside the signed-byte range.
+     */
+    private fun frame(w: Int, h: Int, ts: Long = 7L): FrameData {
+        val y = ByteArray(w * h) { i -> ((i / w) * 10 + (i % w)).toByte() }
+        val cw = w / 2
+        val ch = h / 2
+        val u = ByteArray(cw * ch) { i -> (40 + (i / cw) * 10 + (i % cw)).toByte() }
+        val v = ByteArray(cw * ch) { i -> (80 + (i / cw) * 10 + (i % cw)).toByte() }
+        return FrameData(w, h, y, u, v, ts)
+    }
+
+    @Test
+    fun `rotate 0 is a no-op returning the same instance`() {
+        val f = frame(4, 2)
+        val r = FrameConverter.rotate(f, 0)
+        assertEquals(f, r)
+    }
+
+    @Test
+    fun `rotate 90 swaps dimensions and rotates all planes clockwise`() {
+        // Y 4x4 rows: 0..3 / 10..13 / 20..23 / 30..33.  u 2x2: 40 41 / 50 51.  v: 80 81 / 90 91.
+        val f = frame(4, 4, ts = 99L)
+        val r = FrameConverter.rotate(f, 90)
+
+        assertEquals(4, r.width)
+        assertEquals(4, r.height)
+        assertEquals(99L, r.timestampUs)
+        // 90 CW: bottom row becomes left column.
+        assertArrayEquals(
+            byteArrayOf(30, 20, 10, 0, 31, 21, 11, 1, 32, 22, 12, 2, 33, 23, 13, 3),
+            r.y,
+        )
+        assertArrayEquals(byteArrayOf(50, 40, 51, 41), r.u)
+        assertArrayEquals(byteArrayOf(90, 80, 91, 81), r.v)
+    }
+
+    @Test
+    fun `rotate 180 keeps dimensions and reverses every plane`() {
+        val f = frame(4, 4)
+        val r = FrameConverter.rotate(f, 180)
+
+        assertEquals(4, r.width)
+        assertEquals(4, r.height)
+        assertArrayEquals(
+            byteArrayOf(33, 32, 31, 30, 23, 22, 21, 20, 13, 12, 11, 10, 3, 2, 1, 0),
+            r.y,
+        )
+        assertArrayEquals(byteArrayOf(51, 50, 41, 40), r.u)
+        assertArrayEquals(byteArrayOf(91, 90, 81, 80), r.v)
+    }
+
+    @Test
+    fun `rotate 270 swaps dimensions and rotates all planes counter-clockwise`() {
+        val f = frame(4, 4)
+        val r = FrameConverter.rotate(f, 270)
+
+        assertEquals(4, r.width)
+        assertEquals(4, r.height)
+        // 270 CW: top row becomes left column bottom-to-top.
+        assertArrayEquals(
+            byteArrayOf(3, 13, 23, 33, 2, 12, 22, 32, 1, 11, 21, 31, 0, 10, 20, 30),
+            r.y,
+        )
+        assertArrayEquals(byteArrayOf(41, 51, 40, 50), r.u)
+        assertArrayEquals(byteArrayOf(81, 91, 80, 90), r.v)
+    }
+
+    @Test
+    fun `rotate 90 on a non-square frame swaps width and height`() {
+        // Y 4x2:  0 1 2 3 / 10 11 12 13.
+        val f = frame(4, 2)
+        val r = FrameConverter.rotate(f, 90)
+
+        assertEquals(2, r.width)
+        assertEquals(4, r.height)
+        // 90 CW: bottom row (10..13) becomes the left column.
+        assertArrayEquals(byteArrayOf(10, 0, 11, 1, 12, 2, 13, 3), r.y)
+    }
+
+    @Test
+    fun `rotate 90 then 270 round-trips to the original`() {
+        // Non-square to catch dimension bugs.
+        val f = frame(8, 4)
+        val back = FrameConverter.rotate(FrameConverter.rotate(f, 90), 270)
+        assertEquals(f.width, back.width)
+        assertEquals(f.height, back.height)
+        assertArrayEquals(f.y, back.y)
+        assertArrayEquals(f.u, back.u)
+        assertArrayEquals(f.v, back.v)
+    }
+
+    @Test
+    fun `rotate 180 twice round-trips to the original`() {
+        val f = frame(8, 4)
+        val back = FrameConverter.rotate(FrameConverter.rotate(f, 180), 180)
+        assertEquals(f.width, back.width)
+        assertEquals(f.height, back.height)
+        assertArrayEquals(f.y, back.y)
+        assertArrayEquals(f.u, back.u)
+        assertArrayEquals(f.v, back.v)
+    }
+
+    @Test
+    fun `rotate rejects unsupported angles`() {
+        try {
+            FrameConverter.rotate(frame(4, 2), 45)
+            org.junit.Assert.fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            org.junit.Assert.assertTrue(e.message!!.contains("unsupported rotation"))
+        }
+    }
+
     @Test
     fun toFrameDataRejectsUndersizedFrames() {
         val buf = ByteBuffer.wrap(ByteArray(64))
