@@ -106,4 +106,73 @@ object FrameConverter {
             timestampUs = timestampUs,
         )
     }
+
+    /**
+     * Rotate a tightly-packed I420 [frame] by [degrees] (0, 90, 180, or 270) so the encoded
+     * image is upright. The semantics match `ImageProxy.imageInfo.rotationDegrees`: [degrees]
+     * is the clockwise rotation to APPLY to the buffer to make it display-correct.
+     *
+     * All three planes are rotated (chroma at half resolution); 90/270 swap width and height.
+     * The timestamp is preserved. 0 is a no-op that returns the same instance.
+     *
+     * Index math, in (row, col) terms with source dims (h, w):
+     *  - 90°  CW: out[r][c] = src[h-1-c][r]   (out dims w×h -> rows=w, cols=h)
+     *  - 180°   : out[r][c] = src[h-1-r][w-1-c]
+     *  - 270° CW: out[r][c] = src[c][w-1-r]   (out dims w×h -> rows=w, cols=h)
+     */
+    fun rotate(frame: FrameData, degrees: Int): FrameData {
+        return when (degrees) {
+            0 -> frame
+            90, 180, 270 -> {
+                val (newWidth, newHeight) =
+                    if (degrees == 180) frame.width to frame.height
+                    else frame.height to frame.width
+                FrameData(
+                    width = newWidth,
+                    height = newHeight,
+                    y = rotatePlane(frame.y, frame.width, frame.height, degrees),
+                    u = rotatePlane(frame.u, frame.width / 2, frame.height / 2, degrees),
+                    v = rotatePlane(frame.v, frame.width / 2, frame.height / 2, degrees),
+                    timestampUs = frame.timestampUs,
+                )
+            }
+            else -> throw IllegalArgumentException(
+                "unsupported rotation: $degrees (expected 0, 90, 180, or 270)"
+            )
+        }
+    }
+
+    /**
+     * Rotate one tightly-packed plane of dimensions [srcW]x[srcH] by [degrees]. For 90/270
+     * the output is [srcH]x[srcW]; for 180 the dimensions are unchanged.
+     */
+    private fun rotatePlane(src: ByteArray, srcW: Int, srcH: Int, degrees: Int): ByteArray {
+        val out = ByteArray(src.size)
+        when (degrees) {
+            90 -> {
+                // out dims: rows = srcW, cols = srcH (dstWidth = srcH).
+                for (r in 0 until srcW) {
+                    for (c in 0 until srcH) {
+                        out[r * srcH + c] = src[(srcH - 1 - c) * srcW + r]
+                    }
+                }
+            }
+            180 -> {
+                for (r in 0 until srcH) {
+                    for (c in 0 until srcW) {
+                        out[r * srcW + c] = src[(srcH - 1 - r) * srcW + (srcW - 1 - c)]
+                    }
+                }
+            }
+            270 -> {
+                // out dims: rows = srcW, cols = srcH (dstWidth = srcH).
+                for (r in 0 until srcW) {
+                    for (c in 0 until srcH) {
+                        out[r * srcH + c] = src[c * srcW + (srcW - 1 - r)]
+                    }
+                }
+            }
+        }
+        return out
+    }
 }

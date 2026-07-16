@@ -30,6 +30,7 @@ class PairingController(
     private val client: ControlClient,
     private val phone: PhoneIdentity,
     private val rtp: RtpIdentity,
+    private val video: VideoProfile,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val pollIntervalMs: Long = 1000L,
 ) {
@@ -47,7 +48,7 @@ class PairingController(
         }
 
         _state.value = PairingState.Pairing
-        when (val result = client.pair(payload, phone, rtp.sourcePort, rtp.ssrc)) {
+        when (val result = client.pair(payload, phone, rtp.sourcePort, rtp.ssrc, video)) {
             is PairResult.Failure -> {
                 _state.value = PairingState.Failed(result.message)
                 return

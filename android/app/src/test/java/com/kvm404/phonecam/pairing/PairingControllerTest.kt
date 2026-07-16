@@ -25,6 +25,7 @@ class PairingControllerTest {
 
     private val rtp = RtpIdentity(ssrc = 123L, sourcePort = 40000)
     private val phone = PhoneIdentity(id = "p1", name = "Pixel")
+    private val video = VideoProfile(720, 1280, 30)
 
     /** Fake that records calls and returns scripted results. */
     private class FakeControlClient(
@@ -34,14 +35,17 @@ class PairingControllerTest {
     ) : ControlClient {
         var pairCalls = 0
         var statusCalls = 0
+        var lastVideo: VideoProfile? = null
 
         override fun pair(
             payload: PairingPayload,
             phone: PhoneIdentity,
             rtpPort: Int,
             ssrc: Long,
+            video: VideoProfile,
         ): PairResult {
             pairCalls++
+            lastVideo = video
             return pairResult
         }
 
@@ -60,6 +64,7 @@ class PairingControllerTest {
             client = client,
             phone = phone,
             rtp = rtp,
+            video = video,
             clock = { 0L },
             pollIntervalMs = 1000L,
         )
@@ -71,12 +76,14 @@ class PairingControllerTest {
         assertEquals(futurePayload, (state as PairingState.Paired).payload)
         assertEquals(1, client.pairCalls)
         assertEquals(3, client.statusCalls)
+        // The effective (rotated) profile is forwarded to POST /pair.
+        assertEquals(video, client.lastVideo)
     }
 
     @Test
     fun `pair error becomes Failed`() = runTest {
         val client = FakeControlClient(pairResult = PairResult.Failure("invalid pairing token"))
-        val controller = PairingController(client, phone, rtp, clock = { 0L })
+        val controller = PairingController(client, phone, rtp, video, clock = { 0L })
 
         controller.run(futurePayload)
 
@@ -89,7 +96,7 @@ class PairingControllerTest {
     @Test
     fun `status error becomes Failed`() = runTest {
         val client = FakeControlClient(statusResultOverride = StatusResult.Failure("laptop gone"))
-        val controller = PairingController(client, phone, rtp, clock = { 0L })
+        val controller = PairingController(client, phone, rtp, video, clock = { 0L })
 
         controller.run(futurePayload)
 
@@ -105,6 +112,7 @@ class PairingControllerTest {
             client = client,
             phone = phone,
             rtp = rtp,
+            video = video,
             clock = { Long.MAX_VALUE },
         )
 

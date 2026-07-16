@@ -31,7 +31,13 @@ sealed interface StatusResult {
 
 /** Control-plane client contract, kept small so tests can supply a fake. */
 interface ControlClient {
-    fun pair(payload: PairingPayload, phone: PhoneIdentity, rtpPort: Int, ssrc: Long): PairResult
+    fun pair(
+        payload: PairingPayload,
+        phone: PhoneIdentity,
+        rtpPort: Int,
+        ssrc: Long,
+        video: VideoProfile,
+    ): PairResult
 
     fun status(payload: PairingPayload): StatusResult
 }
@@ -56,6 +62,7 @@ class HttpControlClient(
         phone: PhoneIdentity,
         rtpPort: Int,
         ssrc: Long,
+        video: VideoProfile,
     ): PairResult {
         val body = JSONObject().apply {
             put("session", payload.session)
@@ -66,6 +73,13 @@ class HttpControlClient(
             })
             put("rtp_port", rtpPort)
             put("ssrc", ssrc)
+            // Actual encoder output dims (rotated when the phone streams portrait), so the
+            // laptop sizes its receiver to match. fps stays the payload's advertised rate.
+            put("video", JSONObject().apply {
+                put("width", video.width)
+                put("height", video.height)
+                put("fps", video.fps)
+            })
         }.toString()
 
         return try {

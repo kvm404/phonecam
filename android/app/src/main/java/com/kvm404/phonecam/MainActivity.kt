@@ -66,8 +66,16 @@ class MainActivity : AppCompatActivity() {
     /** Live H.264 encoder while streaming; null when idle or scanning. */
     private var videoEncoder: VideoEncoder? = null
 
-    /** Encoder target profile; camera frames are center-cropped to this during streaming. */
+    /** Encoder target profile (rotated dims); frames are cropped then rotated to this. */
     private var streamingProfile: VideoProfile? = null
+
+    /**
+     * Camera rotation (0/90/180/270) needed to make frames upright, captured from analyzed
+     * frames. The activity is locked portrait so this is constant, but reading it per frame
+     * during QR scanning makes the value available before streaming starts (i.e. at /pair).
+     */
+    @Volatile
+    private var cameraRotationDegrees = 0
 
     /** Guards so only the first successfully-parsed payload triggers pairing. */
     @Volatile
@@ -152,6 +160,7 @@ class MainActivity : AppCompatActivity() {
             imageProxy.close()
             return
         }
+        cameraRotationDegrees = imageProxy.imageInfo.rotationDegrees
         val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
         barcodeScanner.process(image)
             .addOnSuccessListener { barcodes -> handleBarcodes(barcodes) }
@@ -177,10 +186,12 @@ class MainActivity : AppCompatActivity() {
     private fun onPayloadDetected(payload: PairingPayload) {
         imageAnalysis?.clearAnalyzer()
         pairingJob?.cancel()
+        val effectiveVideo = effectiveProfile(payload.video, cameraRotationDegrees)
         pairingJob = lifecycleScope.launch {
             val rtp = withContext(Dispatchers.IO) { RtpIdentity.create() }
             rtpIdentity = rtp
-            val controller = PairingController(HttpControlClient(), phoneIdentity, rtp)
+            val controller =
+                PairingController(HttpControlClient(), phoneIdentity, rtp, effectiveVideo)
             launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     controller.state.collect { render(it, payload) }
@@ -219,34 +230,70 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // The encoder profile is the rotated (possibly portrait) profile — the same dims
+        // reported to the laptop at /pair — so it must match what we crop+rotate to.
+        val profile = effectiveProfile(payload.video, cameraRotationDegrees)
+
         val target = InetSocketAddress(payload.rtpHost, payload.rtpPort)
         val sender = UdpRtpSender(socket, target)
         val packetizer = RtpPacketizer(rtp.ssrc, RtpPacketizer.randomInitialSequenceNumber())
-        val encoder = VideoEncoder(payload.video, packetizer, sender) { error ->
+        val encoder = VideoEncoder(profile, packetizer, sender) { error ->
             runOnUiThread {
                 binding.statusText.text =
                     getString(R.string.status_error, error.localizedMessage ?: error.toString())
             }
         }
         videoEncoder = encoder
-        streamingProfile = payload.video
+        streamingProfile = profile
         encoder.start()
 
         imageAnalysis?.setAnalyzer(analysisExecutor, ::analyzeForStreaming)
         binding.statusText.text = getString(
             R.string.status_streaming,
             "${payload.rtpHost}:${payload.rtpPort}",
-            payload.video.width,
-            payload.video.height,
-            payload.video.fps,
+            profile.width,
+            profile.height,
+            profile.fps,
         )
     }
 
-    /** Streaming-mode analyzer: convert the frame and hand it to the encoder, then close. */
+    /**
+     * The encoder's actual output profile: [base] with width/height swapped when the camera
+     * needs a 90/270° rotation to display upright, so streamed dims are portrait (e.g. the
+     * laptop's 1280x720 profile becomes 720x1280). fps is unchanged.
+     */
+    private fun effectiveProfile(base: VideoProfile, rotation: Int): VideoProfile =
+        if (rotation == 90 || rotation == 270) {
+            VideoProfile(width = base.height, height = base.width, fps = base.fps)
+        } else {
+            base
+        }
+
+    /**
+     * Streaming-mode analyzer: center-crop the landscape sensor buffer to the PRE-rotation
+     * target, rotate to the encoder's (possibly portrait) dims, then hand it to the encoder.
+     *
+     * Order matters: [streamingProfile] holds the rotated encoder dims. For a 90/270 rotation
+     * we crop the source to those dims SWAPPED (landscape, e.g. 1280x720) and then rotate to
+     * land on the encoder profile (720x1280). For 0/180 the crop target is the encoder dims
+     * directly. rotationDegrees is read per frame (cheap; constant in practice).
+     */
     private fun analyzeForStreaming(imageProxy: ImageProxy) {
         try {
+            val profile = streamingProfile
+            val degrees = imageProxy.imageInfo.rotationDegrees
+            // Pre-rotation crop target: undo the width/height swap that rotation will re-apply.
+            val cropWidth: Int
+            val cropHeight: Int
+            if (degrees == 90 || degrees == 270) {
+                cropWidth = profile?.height ?: 0
+                cropHeight = profile?.width ?: 0
+            } else {
+                cropWidth = profile?.width ?: 0
+                cropHeight = profile?.height ?: 0
+            }
             val planes = imageProxy.planes
-            val frame = FrameConverter.toFrameData(
+            val cropped = FrameConverter.toFrameData(
                 width = imageProxy.width,
                 height = imageProxy.height,
                 yBuffer = planes[0].buffer,
@@ -259,9 +306,10 @@ class MainActivity : AppCompatActivity() {
                 vRowStride = planes[2].rowStride,
                 vPixelStride = planes[2].pixelStride,
                 timestampUs = imageProxy.imageInfo.timestamp / 1000,
-                targetWidth = streamingProfile?.width ?: 0,
-                targetHeight = streamingProfile?.height ?: 0,
+                targetWidth = cropWidth,
+                targetHeight = cropHeight,
             )
+            val frame = FrameConverter.rotate(cropped, degrees)
             videoEncoder?.encode(frame)
         } catch (e: IllegalArgumentException) {
             // Unrecoverable geometry problem (frame smaller than the encoder target):

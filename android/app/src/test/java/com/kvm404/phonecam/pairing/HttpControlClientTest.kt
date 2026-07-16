@@ -160,7 +160,13 @@ class HttpControlClientTest {
         }
         server = srv
 
-        val result = client(srv).pair(payload, phone, rtpPort = 40000, ssrc = 3000000000L)
+        val result = client(srv).pair(
+            payload,
+            phone,
+            rtpPort = 40000,
+            ssrc = 3000000000L,
+            video = VideoProfile(1280, 720, 30),
+        )
 
         assertTrue(result is PairResult.Accepted)
         result as PairResult.Accepted
@@ -174,6 +180,38 @@ class HttpControlClientTest {
         assertEquals(3000000000L, body.getLong("ssrc"))
         assertEquals("phone-1", body.getJSONObject("phone").getString("id"))
         assertEquals("Pixel", body.getJSONObject("phone").getString("name"))
+        val video = body.getJSONObject("video")
+        assertEquals(1280, video.getInt("width"))
+        assertEquals(720, video.getInt("height"))
+        assertEquals(30, video.getInt("fps"))
+    }
+
+    @Test
+    fun `pair body carries rotated (swapped) video dims`() {
+        var captured: String? = null
+        val srv = TestHttpServer { _, path, body ->
+            if (path == "/pair") {
+                captured = body
+                202 to """{"ok":true,"approved":false,"session":"sess-123"}"""
+            } else {
+                404 to """{"error":"not found"}"""
+            }
+        }
+        server = srv
+
+        // Portrait streaming: encoder emits 720x1280 even though the payload advertised 1280x720.
+        client(srv).pair(
+            payload,
+            phone,
+            rtpPort = 40000,
+            ssrc = 42L,
+            video = VideoProfile(720, 1280, 30),
+        )
+
+        val video = JSONObject(requireNotNull(captured)).getJSONObject("video")
+        assertEquals(720, video.getInt("width"))
+        assertEquals(1280, video.getInt("height"))
+        assertEquals(30, video.getInt("fps"))
     }
 
     @Test
@@ -183,7 +221,13 @@ class HttpControlClientTest {
         }
         server = srv
 
-        val result = client(srv).pair(payload, phone, rtpPort = 40000, ssrc = 42L)
+        val result = client(srv).pair(
+            payload,
+            phone,
+            rtpPort = 40000,
+            ssrc = 42L,
+            video = VideoProfile(1280, 720, 30),
+        )
 
         assertTrue(result is PairResult.Failure)
         assertEquals("invalid pairing token", (result as PairResult.Failure).message)
