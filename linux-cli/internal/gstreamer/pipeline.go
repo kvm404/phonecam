@@ -7,12 +7,15 @@ import (
 )
 
 const (
-	DefaultPayloadType   = 96
-	DefaultClockRate     = 90000
-	DefaultWidth         = 1280
-	DefaultHeight        = 720
-	DefaultFPS           = 30
-	DefaultJitterLatency = 20
+	DefaultPayloadType = 96
+	DefaultClockRate   = 90000
+	DefaultWidth       = 1280
+	DefaultHeight      = 720
+	DefaultFPS         = 30
+	// DefaultJitterLatency (ms) must absorb real Wi-Fi jitter: at 20ms the
+	// buffer dropped late packets so often that the stream froze every few
+	// seconds until the next keyframe. 150ms is imperceptible in meetings.
+	DefaultJitterLatency = 150
 	DefaultDevice        = "/dev/video10"
 )
 

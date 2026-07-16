@@ -17,7 +17,7 @@ func TestPipelineArgsBuildsV0Pipeline(t *testing.T) {
 		"port=49322",
 		"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000",
 		"rtpjitterbuffer",
-		"latency=20",
+		"latency=150",
 		"drop-on-latency=true",
 		"rtph264depay",
 		"h264parse",
