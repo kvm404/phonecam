@@ -96,7 +96,7 @@ func TestRunDoctorReturnsFailureCodeWhenChecksFail(t *testing.T) {
 
 func TestParseStartFlagsDefaultsToFixedPorts(t *testing.T) {
 	var stderr bytes.Buffer
-	control, rtp, code, ok := parseStartFlags(nil, &stderr)
+	control, rtp, _, code, ok := parseStartFlags(nil, &stderr)
 	if !ok {
 		t.Fatalf("expected ok, got code %d", code)
 	}
@@ -113,7 +113,7 @@ func TestParseStartFlagsDefaultsToFixedPorts(t *testing.T) {
 
 func TestParseStartFlagsOverridesPorts(t *testing.T) {
 	var stderr bytes.Buffer
-	control, rtp, _, ok := parseStartFlags([]string{"--control-port", "9000", "--rtp-port", "9001"}, &stderr)
+	control, rtp, _, _, ok := parseStartFlags([]string{"--control-port", "9000", "--rtp-port", "9001"}, &stderr)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -122,9 +122,29 @@ func TestParseStartFlagsOverridesPorts(t *testing.T) {
 	}
 }
 
+func TestParseStartFlagsAutoApprove(t *testing.T) {
+	var stderr bytes.Buffer
+
+	_, _, auto, _, ok := parseStartFlags(nil, &stderr)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if auto {
+		t.Fatal("expected auto-approve to default to false")
+	}
+
+	_, _, auto, _, ok = parseStartFlags([]string{"--auto-approve"}, &stderr)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if !auto {
+		t.Fatal("expected --auto-approve to enable auto approval")
+	}
+}
+
 func TestParseStartFlagsZeroMeansEphemeral(t *testing.T) {
 	var stderr bytes.Buffer
-	control, rtp, _, ok := parseStartFlags([]string{"--control-port=0", "--rtp-port=0"}, &stderr)
+	control, rtp, _, _, ok := parseStartFlags([]string{"--control-port=0", "--rtp-port=0"}, &stderr)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -135,7 +155,7 @@ func TestParseStartFlagsZeroMeansEphemeral(t *testing.T) {
 
 func TestParseStartFlagsUnknownFlagFails(t *testing.T) {
 	var stderr bytes.Buffer
-	_, _, code, ok := parseStartFlags([]string{"--bogus"}, &stderr)
+	_, _, _, code, ok := parseStartFlags([]string{"--bogus"}, &stderr)
 	if ok {
 		t.Fatal("expected parse failure")
 	}

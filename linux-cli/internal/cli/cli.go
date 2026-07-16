@@ -117,7 +117,7 @@ func requireNoArgs(command string, args []string, stderr io.Writer) (int, bool) 
 }
 
 func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	controlPort, rtpPort, code, ok := parseStartFlags(args, stderr)
+	controlPort, rtpPort, autoApprove, code, ok := parseStartFlags(args, stderr)
 	if !ok {
 		return code
 	}
@@ -128,7 +128,8 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		VirtualCamera: start.DefaultVirtualCamera,
 		ControlPort:   controlPort,
 		RTPPort:       rtpPort,
-	}, stdout)
+		AutoApprove:   autoApprove,
+	}, os.Stdin, stdout)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(stderr, "phonecam start failed: %v\n", err)
 		return 1
@@ -137,9 +138,9 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 }
 
 // parseStartFlags parses the flags for `phonecam start`. It returns the
-// resolved ports; ok is false when the caller should exit with the returned
-// code (2 on an unknown/invalid flag, 0 on -h/--help).
-func parseStartFlags(args []string, stderr io.Writer) (controlPort, rtpPort, code int, ok bool) {
+// resolved ports and auto-approve setting; ok is false when the caller should
+// exit with the returned code (2 on an unknown/invalid flag, 0 on -h/--help).
+func parseStartFlags(args []string, stderr io.Writer) (controlPort, rtpPort int, autoApprove bool, code int, ok bool) {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
@@ -150,18 +151,20 @@ Start pairing and the Linux receiver.
 Flags:
   --control-port int   TCP control port (0 = ephemeral/random) (default 47470)
   --rtp-port int       UDP RTP port (0 = ephemeral/random) (default 47471)
+  --auto-approve       Approve the first phone to pair without prompting
 `)
 	}
 	control := fs.Int("control-port", start.DefaultControlPort, "TCP control port (0 = ephemeral/random)")
 	rtp := fs.Int("rtp-port", start.DefaultRTPPort, "UDP RTP port (0 = ephemeral/random)")
+	auto := fs.Bool("auto-approve", false, "approve the first phone to pair without prompting")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return 0, 0, 0, false
+			return 0, 0, false, 0, false
 		}
-		return 0, 0, 2, false
+		return 0, 0, false, 2, false
 	}
-	return *control, *rtp, 0, true
+	return *control, *rtp, *auto, 0, true
 }
 
 func printHelp(w io.Writer) {
@@ -172,7 +175,8 @@ Usage:
 
 Commands:
   start      Start pairing and the Linux receiver
-             (flags: --control-port [47470], --rtp-port [47471]; 0 = random)
+             (flags: --control-port [47470], --rtp-port [47471]; 0 = random;
+              --auto-approve to skip the pairing prompt)
   smoke      Run a local RTP loopback self-test
   status     Show whether PhoneCam is running and its pairing state
   stop       Stop the running PhoneCam receiver

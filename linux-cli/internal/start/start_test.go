@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -102,17 +103,23 @@ func parsePayload(output string) (pairing.Payload, bool) {
 	return payload, true
 }
 
-// approveViaHTTP performs the /pair (optionally reporting video) and /approve
-// handshake against the control server the payload advertises. The listener is
-// bound to loopback in tests, so /approve's loopback check is satisfied.
-func approveViaHTTP(t *testing.T, payload pairing.Payload, video *pairing.VideoProfile) {
+// controlBase returns the loopback base URL for the control server the payload
+// advertises. The listener is bound to loopback in tests, so the loopback
+// checks on /approve and /pairing are satisfied.
+func controlBase(t *testing.T, payload pairing.Payload) string {
 	t.Helper()
 
 	parsed, err := url.Parse(payload.Control)
 	if err != nil {
 		t.Fatalf("parse control url %q: %v", payload.Control, err)
 	}
-	base := "http://127.0.0.1:" + parsed.Port()
+	return "http://127.0.0.1:" + parsed.Port()
+}
+
+// pairViaHTTP consumes the pairing token as a phone would, optionally reporting
+// a negotiated video profile. It does not approve the session.
+func pairViaHTTP(t *testing.T, payload pairing.Payload, video *pairing.VideoProfile) {
+	t.Helper()
 
 	pairBody := map[string]any{
 		"session":  payload.SessionID,
@@ -124,11 +131,45 @@ func approveViaHTTP(t *testing.T, payload pairing.Payload, video *pairing.VideoP
 	if video != nil {
 		pairBody["video"] = video
 	}
-	if code := postJSONHTTP(t, base+"/pair", pairBody); code != http.StatusAccepted {
+	if code := postJSONHTTP(t, controlBase(t, payload)+"/pair", pairBody); code != http.StatusAccepted {
 		t.Fatalf("expected pair 202, got %d", code)
 	}
-	if code := postJSONHTTP(t, base+"/approve", map[string]any{"session": payload.SessionID}); code != http.StatusOK {
+}
+
+// approveSessionHTTP approves an already-paired session via the /approve
+// endpoint, exercising the automation path.
+func approveSessionHTTP(t *testing.T, payload pairing.Payload) {
+	t.Helper()
+
+	if code := postJSONHTTP(t, controlBase(t, payload)+"/approve", map[string]any{"session": payload.SessionID}); code != http.StatusOK {
 		t.Fatalf("expected approve 200, got %d", code)
+	}
+}
+
+// approveViaHTTP performs the full /pair (optionally reporting video) and
+// /approve handshake against the control server the payload advertises.
+func approveViaHTTP(t *testing.T, payload pairing.Payload, video *pairing.VideoProfile) {
+	t.Helper()
+
+	pairViaHTTP(t, payload, video)
+	approveSessionHTTP(t, payload)
+}
+
+// waitForOutput blocks until the run output contains the given substring.
+func waitForOutput(t *testing.T, out *lockedBuffer, want string) {
+	t.Helper()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if strings.Contains(out.String(), want) {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("output never contained %q:\n%s", want, out.String())
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 }
 
@@ -288,7 +329,7 @@ func TestRunPrintsPairingPayloadAndStopsOnContextCancel(t *testing.T) {
 		done <- New(system, receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
 			VirtualCamera: "/dev/video10",
 			RTPPort:       50123,
-		}, &out)
+		}, nil, &out)
 	}()
 
 	payload := waitForPayload(t, &out)
@@ -369,7 +410,7 @@ func TestRunDefaultsVirtualCameraAndPassesItToReceiver(t *testing.T) {
 			go func() {
 				done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
 					VirtualCamera: tc.virtualCamera,
-				}, &out)
+				}, nil, &out)
 			}()
 
 			payload := waitForPayload(t, &out)
@@ -400,7 +441,7 @@ func TestRunReturnsReceiverError(t *testing.T) {
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{}, &out)
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{}, nil, &out)
 	}()
 
 	approveViaHTTP(t, waitForPayload(t, &out), nil)
@@ -419,7 +460,7 @@ func TestRunReturnsErrorWhenReceiverExitsCleanly(t *testing.T) {
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{}, &out)
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{}, nil, &out)
 	}()
 
 	approveViaHTTP(t, waitForPayload(t, &out), nil)
@@ -439,7 +480,7 @@ func TestRunStartsReceiverWithNegotiatedDimensions(t *testing.T) {
 		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
 			VirtualCamera: "/dev/video10",
 			RTPPort:       50200,
-		}, &out)
+		}, nil, &out)
 	}()
 
 	payload := waitForPayload(t, &out)
@@ -467,7 +508,7 @@ func TestRunNeverStartsReceiverWhenCancelledBeforeApproval(t *testing.T) {
 	go func() {
 		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
 			VirtualCamera: "/dev/video10",
-		}, &out)
+		}, nil, &out)
 	}()
 
 	// Wait until the server is up and pairing has been advertised, but never
@@ -494,7 +535,7 @@ func TestRunFailsFastOnPreflightError(t *testing.T) {
 
 	err := New(testSystem(), receiver, preflight, &fakeStore{}).Run(context.Background(), Config{
 		VirtualCamera: "/dev/video10",
-	}, &out)
+	}, nil, &out)
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("expected preflight error, got %v", err)
 	}
@@ -521,7 +562,7 @@ func TestRunPreflightReceivesDefaultedDevice(t *testing.T) {
 	preflight := &fakePreflight{err: errors.New("boom")}
 	var out lockedBuffer
 
-	_ = New(testSystem(), receiver, preflight, &fakeStore{}).Run(context.Background(), Config{}, &out)
+	_ = New(testSystem(), receiver, preflight, &fakeStore{}).Run(context.Background(), Config{}, nil, &out)
 
 	device, called := preflight.device()
 	if !called {
@@ -548,7 +589,7 @@ func TestRunWrapsBusyControlPort(t *testing.T) {
 	err := New(sys, &blockingReceiver{}, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{
 		VirtualCamera: "/dev/video10",
 		ControlPort:   DefaultControlPort,
-	}, &out)
+	}, nil, &out)
 	if err == nil {
 		t.Fatal("expected error when control port is busy")
 	}
@@ -582,7 +623,7 @@ func TestRunWritesSessionRecordAndRemovesOnCancel(t *testing.T) {
 			VirtualCamera: "/dev/video10",
 			RTPPort:       50321,
 			Now:           startedAt,
-		}, &out)
+		}, nil, &out)
 	}()
 
 	payload := waitForPayload(t, &out)
@@ -624,7 +665,7 @@ func TestRunRemovesSessionRecordOnReceiverFailure(t *testing.T) {
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), resultReceiver{err: errors.New("boom")}, &fakePreflight{}, store).Run(context.Background(), Config{}, &out)
+		done <- New(testSystem(), resultReceiver{err: errors.New("boom")}, &fakePreflight{}, store).Run(context.Background(), Config{}, nil, &out)
 	}()
 
 	approveViaHTTP(t, waitForPayload(t, &out), nil)
@@ -646,7 +687,7 @@ func TestRunContinuesWhenSessionWriteFails(t *testing.T) {
 	go func() {
 		done <- New(testSystem(), receiver, &fakePreflight{}, store).Run(ctx, Config{
 			VirtualCamera: "/dev/video10",
-		}, &out)
+		}, nil, &out)
 	}()
 
 	// Start still proceeds to receiver despite the write failure.
@@ -660,6 +701,158 @@ func TestRunContinuesWhenSessionWriteFails(t *testing.T) {
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRunPromptApprovesOnStdinYes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+			RTPPort:       50401,
+		}, strings.NewReader("y\n"), &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	pairViaHTTP(t, payload, &pairing.VideoProfile{Width: 640, Height: 480, FPS: 15})
+
+	waitForOutput(t, &out, `Phone "Pixel" wants to connect. Approve? [y/N]`)
+
+	config := waitForReceiver(t, receiver)
+	if config.Width != 640 || config.Height != 480 || config.FPS != 15 {
+		t.Fatalf("expected negotiated dimensions 640x480@15, got %dx%d@%d", config.Width, config.Height, config.FPS)
+	}
+	if !strings.Contains(out.String(), "Phone connected: receiving 640x480@15 video") {
+		t.Fatalf("expected phone-connected line, got:\n%s", out.String())
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRunPromptDeniesPairing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer string
+	}{
+		{name: "no", answer: "n\n"},
+		{name: "empty", answer: "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			receiver := &blockingReceiver{}
+			var out lockedBuffer
+			done := make(chan error, 1)
+			go func() {
+				done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{
+					VirtualCamera: "/dev/video10",
+				}, strings.NewReader(tc.answer), &out)
+			}()
+
+			payload := waitForPayload(t, &out)
+			pairViaHTTP(t, payload, nil)
+
+			if err := <-done; err != nil {
+				t.Fatalf("expected nil error on denial, got %v", err)
+			}
+			if !strings.Contains(out.String(), "Pairing denied.") {
+				t.Fatalf("expected pairing denied message, got:\n%s", out.String())
+			}
+			if _, started := receiver.receivedConfig(); started {
+				t.Fatal("expected receiver not to start on denial")
+			}
+		})
+	}
+}
+
+func TestRunAutoApproveSkipsPrompt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+			RTPPort:       50402,
+			AutoApprove:   true,
+		}, nil, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	pairViaHTTP(t, payload, nil)
+
+	waitForReceiver(t, receiver)
+	waitForOutput(t, &out, `Auto-approved phone "Pixel".`)
+	if strings.Contains(out.String(), "wants to connect") {
+		t.Fatalf("expected no prompt with auto-approve, got:\n%s", out.String())
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRunHTTPApproveWithBlockingStdin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+			RTPPort:       50403,
+		}, pr, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	pairViaHTTP(t, payload, nil)
+	waitForOutput(t, &out, `Phone "Pixel" wants to connect`)
+
+	approveSessionHTTP(t, payload)
+
+	waitForReceiver(t, receiver)
+	waitForOutput(t, &out, "Approved via control API.")
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRunCancelWhilePromptPending(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+		}, pr, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	pairViaHTTP(t, payload, nil)
+	waitForOutput(t, &out, `Phone "Pixel" wants to connect`)
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+	if _, started := receiver.receivedConfig(); started {
+		t.Fatal("expected receiver not to start when cancelled at prompt")
 	}
 }
 

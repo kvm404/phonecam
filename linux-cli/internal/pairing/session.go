@@ -253,6 +253,20 @@ func (s *Session) Approve(now time.Time) error {
 	return nil
 }
 
+// PendingPhone returns the phone that consumed the pairing token and true when
+// the session is awaiting approval: the token has been consumed but the session
+// is neither approved nor invalidated. Otherwise it returns a zero Phone and
+// false.
+func (s *Session) PendingPhone() (Phone, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.invalidated || s.approved || !s.consumed {
+		return Phone{}, false
+	}
+	return s.pendingPhone, true
+}
+
 func (s *Session) IsApproved() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

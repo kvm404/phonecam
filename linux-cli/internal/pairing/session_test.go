@@ -119,6 +119,46 @@ func TestApprovalRequiresConsumedToken(t *testing.T) {
 	}
 }
 
+func TestPendingPhoneReflectsSessionLifecycle(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	if _, ok := session.PendingPhone(); ok {
+		t.Fatal("expected no pending phone before pairing")
+	}
+
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	phone, ok := session.PendingPhone()
+	if !ok {
+		t.Fatal("expected pending phone after token consumption")
+	}
+	if phone.Name != "Pixel" {
+		t.Fatalf("expected pending phone Pixel, got %#v", phone)
+	}
+
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("expected approval to succeed: %v", err)
+	}
+	if _, ok := session.PendingPhone(); ok {
+		t.Fatal("expected no pending phone after approval")
+	}
+}
+
+func TestPendingPhoneFalseAfterInvalidate(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	session.Invalidate()
+	if _, ok := session.PendingPhone(); ok {
+		t.Fatal("expected no pending phone after invalidate")
+	}
+}
+
 func TestApprovalRejectsExpiredSessionAfterTokenConsumption(t *testing.T) {
 	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	session := newTestSession(t, Config{Now: now})
