@@ -15,6 +15,7 @@ import (
 	"github.com/kvm404/phonecam/linux-cli/internal/gstreamer"
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
 	"github.com/kvm404/phonecam/linux-cli/internal/qrcode"
+	"github.com/kvm404/phonecam/linux-cli/internal/session"
 	"github.com/kvm404/phonecam/linux-cli/internal/v4l2"
 )
 
@@ -48,6 +49,13 @@ type Receiver interface {
 // Preflight verifies the virtual camera device before the receiver is started.
 type Preflight interface {
 	Verify(device string) error
+}
+
+// SessionStore persists a record of the running start process so `phonecam
+// status` and `phonecam stop` can find it from another terminal.
+type SessionStore interface {
+	Write(session.Record) error
+	Remove() error
 }
 
 // v4l2Preflight adapts v4l2.Verify to the Preflight interface using OSSystem.
@@ -90,9 +98,10 @@ type Runtime struct {
 	system    System
 	receiver  Receiver
 	preflight Preflight
+	store     SessionStore
 }
 
-func New(system System, receiver Receiver, preflight Preflight) Runtime {
+func New(system System, receiver Receiver, preflight Preflight, store SessionStore) Runtime {
 	if system == nil {
 		system = OSSystem{}
 	}
@@ -102,7 +111,10 @@ func New(system System, receiver Receiver, preflight Preflight) Runtime {
 	if preflight == nil {
 		preflight = v4l2Preflight{}
 	}
-	return Runtime{system: system, receiver: receiver, preflight: preflight}
+	if store == nil {
+		store = session.NewStore(nil)
+	}
+	return Runtime{system: system, receiver: receiver, preflight: preflight, store: store}
 }
 
 func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error {
@@ -153,7 +165,7 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 		now = time.Now().UTC()
 	}
 
-	session, err := pairing.New(pairing.Config{
+	pairSession, err := pairing.New(pairing.Config{
 		LaptopName: hostname,
 		ControlURL: fmt.Sprintf("http://%s:%d", host, controlPort),
 		RTPHost:    host,
@@ -164,8 +176,25 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 		return err
 	}
 
+	// The control listener is bound and the pairing session exists, so status
+	// and stop have everything they need to find and verify this process. A
+	// write failure is non-fatal: start continues, status/stop just won't find
+	// it.
+	record := session.Record{
+		PID:         os.Getpid(),
+		ControlPort: controlPort,
+		RTPPort:     rtpPort,
+		SessionID:   pairSession.Payload().SessionID,
+		Device:      virtualCamera,
+		StartedAt:   now,
+	}
+	if err := r.store.Write(record); err != nil {
+		fmt.Fprintf(stdout, "Warning: could not record session for status/stop: %v\n", err)
+	}
+	defer r.store.Remove()
+
 	server := &http.Server{
-		Handler: control.New(control.Config{Session: session}).Handler(),
+		Handler: control.New(control.Config{Session: pairSession}).Handler(),
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -176,7 +205,7 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 		errCh <- nil
 	}()
 
-	writeStartOutput(stdout, virtualCamera, session)
+	writeStartOutput(stdout, virtualCamera, pairSession)
 
 	// Do not start the receiver until the phone has been approved. The phone
 	// reports its actual negotiated video profile during pairing, which we use
@@ -184,22 +213,22 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 	ticker := time.NewTicker(approvalPollInterval)
 	defer ticker.Stop()
 
-	for !session.IsApproved() {
+	for !pairSession.IsApproved() {
 		select {
 		case <-ctx.Done():
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			_ = server.Shutdown(shutdownCtx)
-			session.Invalidate()
+			pairSession.Invalidate()
 			return ctx.Err()
 		case err := <-errCh:
-			session.Invalidate()
+			pairSession.Invalidate()
 			return err
 		case <-ticker.C:
 		}
 	}
 
-	video := session.NegotiatedVideo()
+	video := pairSession.NegotiatedVideo()
 	fmt.Fprintf(stdout, "Phone connected: receiving %dx%d@%d video\n", video.Width, video.Height, video.FPS)
 
 	receiverErr := make(chan error, 1)
@@ -218,16 +247,16 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
-		session.Invalidate()
+		pairSession.Invalidate()
 		return ctx.Err()
 	case err := <-errCh:
-		session.Invalidate()
+		pairSession.Invalidate()
 		return err
 	case err := <-receiverErr:
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
-		session.Invalidate()
+		pairSession.Invalidate()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -241,8 +270,8 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 	}
 }
 
-func writeStartOutput(w io.Writer, virtualCamera string, session *pairing.Session) {
-	payload := session.Payload()
+func writeStartOutput(w io.Writer, virtualCamera string, pairSession *pairing.Session) {
+	payload := pairSession.Payload()
 	payloadJSON, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		payloadJSON = []byte("{}")

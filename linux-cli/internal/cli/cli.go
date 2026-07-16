@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/doctor"
+	"github.com/kvm404/phonecam/linux-cli/internal/lifecycle"
 	"github.com/kvm404/phonecam/linux-cli/internal/smoke"
 	"github.com/kvm404/phonecam/linux-cli/internal/start"
 )
@@ -86,11 +87,15 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 		}
 		return 0
 	case "status":
-		fmt.Fprintln(stderr, "phonecam status is not implemented yet.")
-		return 2
+		if code, ok := requireNoArgs("status", args[1:], stderr); !ok {
+			return code
+		}
+		return lifecycle.NewManager(nil, nil, nil).Status(stdout, stderr)
 	case "stop":
-		fmt.Fprintln(stderr, "phonecam stop is not implemented yet.")
-		return 2
+		if code, ok := requireNoArgs("stop", args[1:], stderr); !ok {
+			return code
+		}
+		return lifecycle.NewManager(nil, nil, nil).Stop(stdout, stderr)
 	case "install":
 		printInstall(sys, stdout)
 		return 0
@@ -101,6 +106,16 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 	}
 }
 
+// requireNoArgs enforces that a command took no extra arguments. When args are
+// present it prints a usage error and returns (2, false) so the caller exits.
+func requireNoArgs(command string, args []string, stderr io.Writer) (int, bool) {
+	if len(args) > 0 {
+		fmt.Fprintf(stderr, "phonecam %s takes no arguments\n", command)
+		return 2, false
+	}
+	return 0, true
+}
+
 func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	controlPort, rtpPort, code, ok := parseStartFlags(args, stderr)
 	if !ok {
@@ -109,7 +124,7 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 	runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	err := start.New(start.OSSystem{}, nil, nil).Run(runCtx, start.Config{
+	err := start.New(start.OSSystem{}, nil, nil, nil).Run(runCtx, start.Config{
 		VirtualCamera: start.DefaultVirtualCamera,
 		ControlPort:   controlPort,
 		RTPPort:       rtpPort,
@@ -159,8 +174,8 @@ Commands:
   start      Start pairing and the Linux receiver
              (flags: --control-port [47470], --rtp-port [47471]; 0 = random)
   smoke      Run a local RTP loopback self-test
-  status     Show receiver and stream status
-  stop       Stop the receiver
+  status     Show whether PhoneCam is running and its pairing state
+  stop       Stop the running PhoneCam receiver
   doctor     Check Linux dependencies and setup
   install    Print distro dependency hints
   version    Print version
