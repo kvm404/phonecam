@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +16,49 @@ import (
 
 	"github.com/kvm404/phonecam/linux-cli/internal/gstreamer"
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
+	"github.com/kvm404/phonecam/linux-cli/internal/session"
 )
+
+// fakeStore records the session records written and how many times Remove was
+// called so tests can assert start persists and cleans up its session file.
+type fakeStore struct {
+	mu       sync.Mutex
+	written  []session.Record
+	removed  int
+	writeErr error
+}
+
+func (s *fakeStore) Write(record session.Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeErr != nil {
+		return s.writeErr
+	}
+	s.written = append(s.written, record)
+	return nil
+}
+
+func (s *fakeStore) Remove() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removed++
+	return nil
+}
+
+func (s *fakeStore) lastWritten() (session.Record, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.written) == 0 {
+		return session.Record{}, false
+	}
+	return s.written[len(s.written)-1], true
+}
+
+func (s *fakeStore) removeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.removed
+}
 
 func init() {
 	// Shorten the approval poll so tests that gate the receiver on approval do
@@ -242,7 +285,7 @@ func TestRunPrintsPairingPayloadAndStopsOnContextCancel(t *testing.T) {
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(system, receiver, &fakePreflight{}).Run(ctx, Config{
+		done <- New(system, receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
 			VirtualCamera: "/dev/video10",
 			RTPPort:       50123,
 		}, &out)
@@ -324,7 +367,7 @@ func TestRunDefaultsVirtualCameraAndPassesItToReceiver(t *testing.T) {
 			var out lockedBuffer
 			done := make(chan error, 1)
 			go func() {
-				done <- New(testSystem(), receiver, &fakePreflight{}).Run(ctx, Config{
+				done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
 					VirtualCamera: tc.virtualCamera,
 				}, &out)
 			}()
@@ -357,7 +400,7 @@ func TestRunReturnsReceiverError(t *testing.T) {
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), receiver, &fakePreflight{}).Run(context.Background(), Config{}, &out)
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{}, &out)
 	}()
 
 	approveViaHTTP(t, waitForPayload(t, &out), nil)
@@ -376,7 +419,7 @@ func TestRunReturnsErrorWhenReceiverExitsCleanly(t *testing.T) {
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), receiver, &fakePreflight{}).Run(context.Background(), Config{}, &out)
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{}, &out)
 	}()
 
 	approveViaHTTP(t, waitForPayload(t, &out), nil)
@@ -393,7 +436,7 @@ func TestRunStartsReceiverWithNegotiatedDimensions(t *testing.T) {
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), receiver, &fakePreflight{}).Run(ctx, Config{
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
 			VirtualCamera: "/dev/video10",
 			RTPPort:       50200,
 		}, &out)
@@ -422,7 +465,7 @@ func TestRunNeverStartsReceiverWhenCancelledBeforeApproval(t *testing.T) {
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), receiver, &fakePreflight{}).Run(ctx, Config{
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
 			VirtualCamera: "/dev/video10",
 		}, &out)
 	}()
@@ -449,7 +492,7 @@ func TestRunFailsFastOnPreflightError(t *testing.T) {
 	preflight := &fakePreflight{err: errors.New("virtual camera /dev/video10 does not exist")}
 	var out lockedBuffer
 
-	err := New(testSystem(), receiver, preflight).Run(context.Background(), Config{
+	err := New(testSystem(), receiver, preflight, &fakeStore{}).Run(context.Background(), Config{
 		VirtualCamera: "/dev/video10",
 	}, &out)
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
@@ -478,7 +521,7 @@ func TestRunPreflightReceivesDefaultedDevice(t *testing.T) {
 	preflight := &fakePreflight{err: errors.New("boom")}
 	var out lockedBuffer
 
-	_ = New(testSystem(), receiver, preflight).Run(context.Background(), Config{}, &out)
+	_ = New(testSystem(), receiver, preflight, &fakeStore{}).Run(context.Background(), Config{}, &out)
 
 	device, called := preflight.device()
 	if !called {
@@ -502,7 +545,7 @@ func (listenErrSystem) Listen(network, address string) (net.Listener, error) {
 func TestRunWrapsBusyControlPort(t *testing.T) {
 	sys := listenErrSystem{fakeSystem: testSystem()}
 	var out lockedBuffer
-	err := New(sys, &blockingReceiver{}, &fakePreflight{}).Run(context.Background(), Config{
+	err := New(sys, &blockingReceiver{}, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{
 		VirtualCamera: "/dev/video10",
 		ControlPort:   DefaultControlPort,
 	}, &out)
@@ -524,6 +567,99 @@ func TestLocalIPv4FallsBackToLoopback(t *testing.T) {
 	}
 	if got != "127.0.0.1" {
 		t.Fatalf("expected loopback fallback, got %q", got)
+	}
+}
+
+func TestRunWritesSessionRecordAndRemovesOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	store := &fakeStore{}
+	startedAt := time.Date(2026, 7, 16, 9, 30, 0, 0, time.UTC)
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, store).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+			RTPPort:       50321,
+			Now:           startedAt,
+		}, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+
+	record, ok := store.lastWritten()
+	if !ok {
+		t.Fatal("expected a session record to be written")
+	}
+	if record.SessionID != payload.SessionID {
+		t.Fatalf("expected recorded session id %q, got %q", payload.SessionID, record.SessionID)
+	}
+	if record.RTPPort != 50321 {
+		t.Fatalf("expected recorded RTP port 50321, got %d", record.RTPPort)
+	}
+	if record.ControlPort <= 0 {
+		t.Fatalf("expected a recorded control port, got %d", record.ControlPort)
+	}
+	if record.Device != "/dev/video10" {
+		t.Fatalf("expected recorded device /dev/video10, got %q", record.Device)
+	}
+	if record.PID != os.Getpid() {
+		t.Fatalf("expected recorded PID %d, got %d", os.Getpid(), record.PID)
+	}
+	if !record.StartedAt.Equal(startedAt) {
+		t.Fatalf("expected recorded StartedAt %v, got %v", startedAt, record.StartedAt)
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+	if store.removeCount() == 0 {
+		t.Fatal("expected session record removed on exit")
+	}
+}
+
+func TestRunRemovesSessionRecordOnReceiverFailure(t *testing.T) {
+	store := &fakeStore{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), resultReceiver{err: errors.New("boom")}, &fakePreflight{}, store).Run(context.Background(), Config{}, &out)
+	}()
+
+	approveViaHTTP(t, waitForPayload(t, &out), nil)
+
+	if err := <-done; err == nil {
+		t.Fatal("expected receiver failure error")
+	}
+	if store.removeCount() == 0 {
+		t.Fatal("expected session record removed after receiver failure")
+	}
+}
+
+func TestRunContinuesWhenSessionWriteFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	store := &fakeStore{writeErr: errors.New("disk full")}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, store).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+		}, &out)
+	}()
+
+	// Start still proceeds to receiver despite the write failure.
+	approveViaHTTP(t, waitForPayload(t, &out), nil)
+	waitForReceiver(t, receiver)
+
+	if !strings.Contains(out.String(), "Warning: could not record session") {
+		t.Fatalf("expected a warning on write failure, got:\n%s", out.String())
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
 	}
 }
 

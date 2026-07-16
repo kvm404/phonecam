@@ -166,6 +166,28 @@ func TestHelpMentionsStartPortFlags(t *testing.T) {
 	}
 }
 
+func TestRunStatusRejectsExtraArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(nil, fakeSystem{}, []string{"status", "extra"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "status takes no arguments") {
+		t.Fatalf("expected usage error, got:\n%s", stderr.String())
+	}
+}
+
+func TestRunStopRejectsExtraArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(nil, fakeSystem{}, []string{"stop", "extra"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "stop takes no arguments") {
+		t.Fatalf("expected usage error, got:\n%s", stderr.String())
+	}
+}
+
 func TestInstallMentionsFirewallAndPersistence(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	Run(nil, fakeSystem{
