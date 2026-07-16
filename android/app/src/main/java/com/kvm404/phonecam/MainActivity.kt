@@ -4,6 +4,9 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Size
+import android.view.View
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -15,7 +18,6 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
-import android.util.Size
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -24,13 +26,15 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.kvm404.phonecam.databinding.ActivityMainBinding
+import com.kvm404.phonecam.pairing.EffectiveVideo
 import com.kvm404.phonecam.pairing.HttpControlClient
+import com.kvm404.phonecam.pairing.OrientationMode
 import com.kvm404.phonecam.pairing.PairingController
 import com.kvm404.phonecam.pairing.PairingPayload
 import com.kvm404.phonecam.pairing.PairingState
 import com.kvm404.phonecam.pairing.PhoneIdentity
 import com.kvm404.phonecam.pairing.RtpIdentity
-import com.kvm404.phonecam.pairing.VideoProfile
+import com.kvm404.phonecam.pairing.effectiveVideo
 import com.kvm404.phonecam.streaming.FrameConverter
 import com.kvm404.phonecam.streaming.RtpPacketizer
 import com.kvm404.phonecam.streaming.UdpRtpSender
@@ -43,8 +47,15 @@ import java.net.InetSocketAddress
 import java.util.UUID
 import java.util.concurrent.Executors
 
+/**
+ * Single-activity, three-screen UI (Home / Scan / Session) switched by [ScreenState]. All
+ * protocol + streaming machinery ([PairingController], [RtpIdentity], [FrameConverter],
+ * [VideoEncoder], …) is reused unchanged; this class is only the UI/orchestration seam.
+ */
 @ExperimentalGetImage
 class MainActivity : AppCompatActivity() {
+
+    private enum class ScreenState { HOME, SCAN, SESSION }
 
     private lateinit var binding: ActivityMainBinding
 
@@ -57,6 +68,7 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private var cameraProvider: ProcessCameraProvider? = null
     private var imageAnalysis: ImageAnalysis? = null
     private var pairingJob: Job? = null
 
@@ -66,18 +78,27 @@ class MainActivity : AppCompatActivity() {
     /** Live H.264 encoder while streaming; null when idle or scanning. */
     private var videoEncoder: VideoEncoder? = null
 
-    /** Encoder target profile (rotated dims); frames are cropped then rotated to this. */
-    private var streamingProfile: VideoProfile? = null
+    private var screenState = ScreenState.HOME
+
+    /** The payload of the active session; null on Home. */
+    private var payload: PairingPayload? = null
+
+    /** Latest pairing state; null in the "found — not connected" phase. */
+    private var pairingState: PairingState? = null
+
+    /** Options: default Back camera, Auto orientation. */
+    private var cameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+    private var orientationMode: OrientationMode = OrientationMode.AUTO
 
     /**
      * Camera rotation (0/90/180/270) needed to make frames upright, captured from analyzed
-     * frames. The activity is locked portrait so this is constant, but reading it per frame
-     * during QR scanning makes the value available before streaming starts (i.e. at /pair).
+     * frames during the scan phase. The activity is portrait-locked so this is constant; it
+     * seeds the /pair dims before streaming starts.
      */
     @Volatile
     private var cameraRotationDegrees = 0
 
-    /** Guards so only the first successfully-parsed payload triggers pairing. */
+    /** Guards so only the first successfully-parsed payload triggers a session. */
     @Volatile
     private var handledPayload = false
 
@@ -91,9 +112,9 @@ class MainActivity : AppCompatActivity() {
     private val requestCameraPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
-                startCamera()
+                showScan()
             } else {
-                binding.statusText.text = getString(R.string.status_permission_needed)
+                binding.homeStatusText.text = getString(R.string.home_status_permission_needed)
             }
         }
 
@@ -102,57 +123,183 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        binding.statusText.setOnClickListener { resetScanning() }
+        wireUp()
+        showHome(getString(R.string.home_status_not_connected))
 
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when (screenState) {
+                    ScreenState.SCAN -> teardownToHome(getString(R.string.home_status_not_connected))
+                    ScreenState.SESSION -> teardownToHome(getString(R.string.home_status_disconnected))
+                    ScreenState.HOME -> finish()
+                }
+            }
+        })
+    }
+
+    private fun wireUp() {
+        binding.scanConnectButton.setOnClickListener { onScanConnectClicked() }
+        binding.exitButton.setOnClickListener { finish() }
+        binding.scanCancelButton.setOnClickListener {
+            teardownToHome(getString(R.string.home_status_not_connected))
+        }
+        binding.connectButton.setOnClickListener { onConnectClicked() }
+        binding.startButton.setOnClickListener { onStartCameraClicked() }
+        binding.stopButton.setOnClickListener { onStopCameraClicked() }
+        binding.scanAgainButton.setOnClickListener { onScanConnectClicked() }
+        binding.disconnectButton.setOnClickListener {
+            teardownToHome(getString(R.string.home_status_disconnected))
+        }
+
+        binding.cameraToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            cameraSelector = if (checkedId == R.id.cameraFront) {
+                CameraSelector.DEFAULT_FRONT_CAMERA
+            } else {
+                CameraSelector.DEFAULT_BACK_CAMERA
+            }
+            // Rebind live so the switch takes effect while streaming (brief hiccup is fine).
+            if (videoEncoder != null) bindStreamingCamera()
+        }
+
+        binding.orientationToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            orientationMode = when (checkedId) {
+                R.id.orientationPortrait -> OrientationMode.PORTRAIT
+                R.id.orientationLandscape -> OrientationMode.LANDSCAPE
+                else -> OrientationMode.AUTO
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ Screen switching
+
+    private fun showHome(status: String) {
+        screenState = ScreenState.HOME
+        binding.homeStatusText.text = status
+        binding.homeContainer.visibility = View.VISIBLE
+        binding.scanContainer.visibility = View.GONE
+        binding.sessionContainer.visibility = View.GONE
+    }
+
+    private fun onScanConnectClicked() {
         if (hasCameraPermission()) {
-            startCamera()
+            showScan()
         } else {
-            binding.statusText.text = getString(R.string.status_permission_needed)
             requestCameraPermission.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    private fun showScan() {
+        screenState = ScreenState.SCAN
+        handledPayload = false
+        binding.homeContainer.visibility = View.GONE
+        binding.sessionContainer.visibility = View.GONE
+        binding.scanContainer.visibility = View.VISIBLE
+        bindScanCamera()
+    }
+
+    private fun showSession() {
+        screenState = ScreenState.SESSION
+        binding.homeContainer.visibility = View.GONE
+        binding.scanContainer.visibility = View.GONE
+        binding.sessionContainer.visibility = View.VISIBLE
+        updateSessionUi()
+    }
+
+    /** Full teardown of any active session/scan, then return to Home. */
+    private fun teardownToHome(status: String) {
+        pairingJob?.cancel()
+        pairingJob = null
+        handledPayload = false
+        stopStreaming()
+        unbindCamera()
+        payload = null
+        pairingState = null
+        showHome(status)
     }
 
     private fun hasCameraPermission(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
 
-    private fun startCamera() {
-        val providerFuture = ProcessCameraProvider.getInstance(this)
-        providerFuture.addListener({
-            try {
-                val cameraProvider = providerFuture.get()
-                val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = binding.previewView.surfaceProvider
-                }
-                val resolutionSelector = ResolutionSelector.Builder()
-                    .setResolutionStrategy(
-                        ResolutionStrategy(
-                            Size(1280, 720),
-                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
-                        )
-                    )
-                    .build()
-                val analysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setResolutionSelector(resolutionSelector)
-                    .build()
-                    .also { it.setAnalyzer(analysisExecutor, ::analyze) }
-                imageAnalysis = analysis
+    // ------------------------------------------------------------------ Camera binding
 
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
-                    this,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    analysis
-                )
-                binding.statusText.text = getString(R.string.status_scan_qr)
+    private fun withProvider(action: (ProcessCameraProvider) -> Unit) {
+        val existing = cameraProvider
+        if (existing != null) {
+            action(existing)
+            return
+        }
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            try {
+                val provider = future.get()
+                cameraProvider = provider
+                action(provider)
             } catch (e: Exception) {
-                binding.statusText.text =
-                    getString(R.string.status_error, e.localizedMessage ?: e.toString())
+                showSessionOrHomeError(e.localizedMessage ?: e.toString())
             }
         }, ContextCompat.getMainExecutor(this))
     }
+
+    private fun buildAnalysis(analyzer: (ImageProxy) -> Unit): ImageAnalysis {
+        val resolutionSelector = ResolutionSelector.Builder()
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    Size(1280, 720),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                )
+            )
+            .build()
+        return ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setResolutionSelector(resolutionSelector)
+            .build()
+            .also { it.setAnalyzer(analysisExecutor, analyzer) }
+    }
+
+    /** Bind the QR-scanning pipeline (back camera) to the fullscreen scan preview. */
+    private fun bindScanCamera() {
+        withProvider { provider ->
+            val preview = Preview.Builder().build().also {
+                it.surfaceProvider = binding.scanPreview.surfaceProvider
+            }
+            val analysis = buildAnalysis(::analyze)
+            imageAnalysis = analysis
+            provider.unbindAll()
+            try {
+                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+            } catch (e: Exception) {
+                showSessionOrHomeError(e.localizedMessage ?: e.toString())
+            }
+        }
+    }
+
+    /** Bind the streaming pipeline (selected camera) to the small session preview card. */
+    private fun bindStreamingCamera() {
+        withProvider { provider ->
+            val preview = Preview.Builder().build().also {
+                it.surfaceProvider = binding.sessionPreview.surfaceProvider
+            }
+            val analysis = buildAnalysis(::analyzeForStreaming)
+            imageAnalysis = analysis
+            provider.unbindAll()
+            try {
+                provider.bindToLifecycle(this, cameraSelector, preview, analysis)
+            } catch (e: Exception) {
+                showSessionOrHomeError(e.localizedMessage ?: e.toString())
+            }
+        }
+    }
+
+    private fun unbindCamera() {
+        imageAnalysis?.clearAnalyzer()
+        imageAnalysis = null
+        cameraProvider?.unbindAll()
+    }
+
+    // ------------------------------------------------------------------ Scan / detect
 
     private fun analyze(imageProxy: ImageProxy) {
         val mediaImage = imageProxy.image
@@ -171,126 +318,124 @@ class MainActivity : AppCompatActivity() {
         if (handledPayload) return
         for (barcode in barcodes) {
             val raw = barcode.rawValue ?: continue
-            val payload = try {
+            val parsed = try {
                 PairingPayload.parse(raw)
             } catch (e: IllegalArgumentException) {
                 // Not a pairing QR (or malformed) — keep scanning.
                 continue
             }
             handledPayload = true
-            onPayloadDetected(payload)
+            onPayloadDetected(parsed)
             return
         }
     }
 
-    private fun onPayloadDetected(payload: PairingPayload) {
+    /** A valid QR was found: stop scanning, unbind the camera, and open the Session screen. */
+    private fun onPayloadDetected(detected: PairingPayload) {
         imageAnalysis?.clearAnalyzer()
+        unbindCamera()
         pairingJob?.cancel()
-        val effectiveVideo = effectiveProfile(payload.video, cameraRotationDegrees)
+        pairingJob = null
+        payload = detected
+        pairingState = null
+        showSession()
+    }
+
+    // ------------------------------------------------------------------ Pairing
+
+    private fun onConnectClicked() {
+        val current = payload ?: return
+        // Guard rapid taps: don't launch a second handshake while one is running or done.
+        if (pairingJob != null) return
+
+        // Orientation determines the /pair dims, so it is now locked for this connection.
+        binding.orientationToggle.isEnabled = false
+        binding.orientationHelper.visibility = View.VISIBLE
+
+        val committed = effectiveVideo(current.video, orientationMode, cameraRotationDegrees)
+        pairingState = PairingState.Pairing
+        updateSessionUi()
+
         pairingJob = lifecycleScope.launch {
             val rtp = withContext(Dispatchers.IO) { RtpIdentity.create() }
             rtpIdentity = rtp
             val controller =
-                PairingController(HttpControlClient(), phoneIdentity, rtp, effectiveVideo)
+                PairingController(HttpControlClient(), phoneIdentity, rtp, committed.profile)
             launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    controller.state.collect { render(it, payload) }
+                    controller.state.collect { state ->
+                        pairingState = state
+                        updateSessionUi()
+                    }
                 }
             }
-            withContext(Dispatchers.IO) { controller.run(payload) }
+            withContext(Dispatchers.IO) { controller.run(current) }
         }
     }
 
-    private fun render(state: PairingState, payload: PairingPayload) {
-        when (state) {
-            PairingState.Idle -> binding.statusText.text = getString(R.string.status_scan_qr)
-            PairingState.Pairing ->
-                binding.statusText.text = getString(R.string.status_pairing, payload.name)
-            PairingState.WaitingApproval ->
-                binding.statusText.text =
-                    getString(R.string.status_waiting_approval, payload.name)
-            is PairingState.Paired -> startStreaming(state.payload)
-            is PairingState.Failed ->
-                binding.statusText.text = getString(R.string.status_failed, state.message)
-        }
-    }
+    // ------------------------------------------------------------------ Streaming
 
-    /**
-     * Once paired, swap the QR analyzer for the streaming analyzer and start the H.264
-     * encoder, sending RTP from the pairing-committed socket + SSRC to the payload's RTP
-     * endpoint at its video profile. Idempotent: subsequent Paired emissions are ignored.
-     */
-    private fun startStreaming(payload: PairingPayload) {
+    private fun onStartCameraClicked() {
+        val current = payload ?: return
+        if (pairingState !is PairingState.Paired) return
+        // Guard rapid taps.
         if (videoEncoder != null) return
+
         val rtp = rtpIdentity
         val socket = rtp?.socket
         if (rtp == null || socket == null) {
-            binding.statusText.text =
-                getString(R.string.status_error, "missing RTP socket")
+            showSessionOrHomeError("missing RTP socket")
             return
         }
 
-        // The encoder profile is the rotated (possibly portrait) profile — the same dims
-        // reported to the laptop at /pair — so it must match what we crop+rotate to.
-        val profile = effectiveProfile(payload.video, cameraRotationDegrees)
+        // Encoder dims match the /pair dims: computed from the same base + mode + rotation.
+        val committed = effectiveVideo(current.video, orientationMode, cameraRotationDegrees)
+        val profile = committed.profile
 
-        val target = InetSocketAddress(payload.rtpHost, payload.rtpPort)
+        val target = InetSocketAddress(current.rtpHost, current.rtpPort)
         val sender = UdpRtpSender(socket, target)
         val packetizer = RtpPacketizer(rtp.ssrc, RtpPacketizer.randomInitialSequenceNumber())
         val encoder = VideoEncoder(profile, packetizer, sender) { error ->
-            runOnUiThread {
-                binding.statusText.text =
-                    getString(R.string.status_error, error.localizedMessage ?: error.toString())
-            }
+            runOnUiThread { showSessionOrHomeError(error.localizedMessage ?: error.toString()) }
         }
         videoEncoder = encoder
-        streamingProfile = profile
         encoder.start()
 
-        imageAnalysis?.setAnalyzer(analysisExecutor, ::analyzeForStreaming)
-        binding.statusText.text = getString(
-            R.string.status_streaming,
-            "${payload.rtpHost}:${payload.rtpPort}",
-            profile.width,
-            profile.height,
-            profile.fps,
-        )
+        sizePreviewCard(profile.width, profile.height)
+        bindStreamingCamera()
+        updateSessionUi()
+    }
+
+    private fun onStopCameraClicked() {
+        // Stop encoding + unbind the analyzer, but stay Connected so Start is available again.
+        videoEncoder?.stop()
+        videoEncoder = null
+        unbindCamera()
+        updateSessionUi()
     }
 
     /**
-     * The encoder's actual output profile: [base] with width/height swapped when the camera
-     * needs a 90/270° rotation to display upright, so streamed dims are portrait (e.g. the
-     * laptop's 1280x720 profile becomes 720x1280). fps is unchanged.
-     */
-    private fun effectiveProfile(base: VideoProfile, rotation: Int): VideoProfile =
-        if (rotation == 90 || rotation == 270) {
-            VideoProfile(width = base.height, height = base.width, fps = base.fps)
-        } else {
-            base
-        }
-
-    /**
-     * Streaming-mode analyzer: center-crop the landscape sensor buffer to the PRE-rotation
-     * target, rotate to the encoder's (possibly portrait) dims, then hand it to the encoder.
-     *
-     * Order matters: [streamingProfile] holds the rotated encoder dims. For a 90/270 rotation
-     * we crop the source to those dims SWAPPED (landscape, e.g. 1280x720) and then rotate to
-     * land on the encoder profile (720x1280). For 0/180 the crop target is the encoder dims
-     * directly. rotationDegrees is read per frame (cheap; constant in practice).
+     * Streaming-mode analyzer: center-crop the landscape sensor buffer to the pre-rotation
+     * target for the chosen orientation, rotate it onto the committed encoder dims, then feed
+     * the encoder. Both dims and rotation come from [effectiveVideo] so front/back switches
+     * (rotation re-read per frame) and forced-orientation modes stay consistent.
      */
     private fun analyzeForStreaming(imageProxy: ImageProxy) {
         try {
-            val profile = streamingProfile
+            val current = payload
             val degrees = imageProxy.imageInfo.rotationDegrees
-            // Pre-rotation crop target: undo the width/height swap that rotation will re-apply.
+            val eff: EffectiveVideo? =
+                current?.let { effectiveVideo(it.video, orientationMode, degrees) }
+            val rotation = eff?.rotationDegrees ?: 0
+            // Pre-rotation crop target: undo the swap that [rotation] will re-apply.
             val cropWidth: Int
             val cropHeight: Int
-            if (degrees == 90 || degrees == 270) {
-                cropWidth = profile?.height ?: 0
-                cropHeight = profile?.width ?: 0
+            if (rotation == 90 || rotation == 270) {
+                cropWidth = eff?.profile?.height ?: 0
+                cropHeight = eff?.profile?.width ?: 0
             } else {
-                cropWidth = profile?.width ?: 0
-                cropHeight = profile?.height ?: 0
+                cropWidth = eff?.profile?.width ?: 0
+                cropHeight = eff?.profile?.height ?: 0
             }
             val planes = imageProxy.planes
             val cropped = FrameConverter.toFrameData(
@@ -309,15 +454,12 @@ class MainActivity : AppCompatActivity() {
                 targetWidth = cropWidth,
                 targetHeight = cropHeight,
             )
-            val frame = FrameConverter.rotate(cropped, degrees)
+            val frame = FrameConverter.rotate(cropped, rotation)
             videoEncoder?.encode(frame)
         } catch (e: IllegalArgumentException) {
             // Unrecoverable geometry problem (frame smaller than the encoder target):
             // surface it instead of silently dropping every frame.
-            runOnUiThread {
-                binding.statusText.text =
-                    getString(R.string.status_error, e.message ?: e.toString())
-            }
+            runOnUiThread { showSessionOrHomeError(e.message ?: e.toString()) }
         } catch (_: Exception) {
             // Drop this frame; a transient conversion/encode error must not stop the stream.
         } finally {
@@ -329,19 +471,85 @@ class MainActivity : AppCompatActivity() {
     private fun stopStreaming() {
         videoEncoder?.stop()
         videoEncoder = null
-        streamingProfile = null
         rtpIdentity?.close()
         rtpIdentity = null
     }
 
-    /** Cancel any in-flight pairing and resume QR scanning. Driven by tapping the status text. */
-    private fun resetScanning() {
-        pairingJob?.cancel()
-        pairingJob = null
-        handledPayload = false
-        stopStreaming()
-        imageAnalysis?.setAnalyzer(analysisExecutor, ::analyze)
-        binding.statusText.text = getString(R.string.status_scan_qr)
+    // ------------------------------------------------------------------ Session UI
+
+    /** Render the Session screen from [payload], [pairingState] and the streaming flag. */
+    private fun updateSessionUi() {
+        if (screenState != ScreenState.SESSION) return
+        val current = payload ?: return
+        binding.sessionName.text = current.name
+
+        val streaming = videoEncoder != null
+        val state = pairingState
+
+        // Default everything hidden, then reveal per state.
+        binding.connectButton.visibility = View.GONE
+        binding.startButton.visibility = View.GONE
+        binding.stopButton.visibility = View.GONE
+        binding.scanAgainButton.visibility = View.GONE
+        binding.previewCard.visibility = View.GONE
+
+        when (state) {
+            null -> {
+                binding.sessionStatus.text =
+                    getString(R.string.session_status_found, current.name)
+                binding.connectButton.visibility = View.VISIBLE
+                binding.orientationToggle.isEnabled = true
+                binding.orientationHelper.visibility = View.GONE
+            }
+            PairingState.Idle, PairingState.Pairing -> {
+                binding.sessionStatus.text = getString(R.string.session_status_pairing)
+            }
+            PairingState.WaitingApproval -> {
+                binding.sessionStatus.text =
+                    getString(R.string.session_status_waiting, current.name)
+            }
+            is PairingState.Paired -> {
+                if (streaming) {
+                    val encDims = effectiveVideo(current.video, orientationMode, cameraRotationDegrees)
+                    binding.sessionStatus.text = getString(
+                        R.string.session_status_streaming,
+                        encDims.profile.width,
+                        encDims.profile.height,
+                        encDims.profile.fps,
+                    )
+                    binding.stopButton.visibility = View.VISIBLE
+                    binding.previewCard.visibility = View.VISIBLE
+                } else {
+                    binding.sessionStatus.text = getString(R.string.session_status_connected)
+                    binding.startButton.visibility = View.VISIBLE
+                }
+            }
+            is PairingState.Failed -> {
+                binding.sessionStatus.text =
+                    getString(R.string.session_status_failed, state.message)
+                binding.scanAgainButton.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    /** Size the preview card to ~half the screen width, matching the stream aspect ratio. */
+    private fun sizePreviewCard(streamWidth: Int, streamHeight: Int) {
+        if (streamWidth <= 0 || streamHeight <= 0) return
+        val cardWidth = resources.displayMetrics.widthPixels / 2
+        val cardHeight = (cardWidth.toLong() * streamHeight / streamWidth).toInt()
+        val params = binding.sessionPreview.layoutParams
+        params.width = cardWidth
+        params.height = cardHeight
+        binding.sessionPreview.layoutParams = params
+    }
+
+    private fun showSessionOrHomeError(message: String) {
+        val text = getString(R.string.home_status_error, message)
+        if (screenState == ScreenState.SESSION) {
+            binding.sessionStatus.text = getString(R.string.session_status_error, message)
+        } else {
+            binding.homeStatusText.text = text
+        }
     }
 
     override fun onDestroy() {
@@ -349,6 +557,7 @@ class MainActivity : AppCompatActivity() {
         pairingJob?.cancel()
         stopStreaming()
         imageAnalysis?.clearAnalyzer()
+        cameraProvider?.unbindAll()
         analysisExecutor.shutdown()
         barcodeScanner.close()
     }
