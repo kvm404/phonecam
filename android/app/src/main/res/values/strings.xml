@@ -1,14 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">PhoneCam</string>
-    <string name="status_starting">PhoneCam — starting…</string>
-    <string name="status_permission_needed">PhoneCam — Camera permission needed</string>
-    <string name="status_preview_running">PhoneCam — Preview running</string>
-    <string name="status_error">PhoneCam — Error: %1$s</string>
-    <string name="status_scan_qr">Scan the QR from phonecam start</string>
-    <string name="status_pairing">Pairing with %1$s…</string>
-    <string name="status_waiting_approval">Waiting for approval on %1$s…</string>
-    <string name="status_paired">Paired with %1$s — RTP target %2$s</string>
-    <string name="status_streaming">Streaming to %1$s (%2$dx%3$d@%4$d)</string>
-    <string name="status_failed">%1$s\n(tap to rescan)</string>
+    <string name="tagline">Use your phone as a wireless webcam for your laptop.</string>
+
+    <!-- Home screen -->
+    <string name="home_status_not_connected">Not connected</string>
+    <string name="home_status_disconnected">Disconnected</string>
+    <string name="home_status_permission_needed">Camera permission is needed to scan the QR.</string>
+    <string name="home_status_error">Error: %1$s</string>
+    <string name="btn_scan_connect">Scan QR to connect</string>
+    <string name="btn_exit">Exit</string>
+
+    <!-- Scan screen -->
+    <string name="scan_hint">Scan the QR from phonecam start</string>
+    <string name="btn_cancel">Cancel</string>
+
+    <!-- Session screen -->
+    <string name="session_status_found">Found %1$s — not connected</string>
+    <string name="session_status_pairing">Pairing…</string>
+    <string name="session_status_waiting">Waiting for approval on %1$s… (check the laptop terminal)</string>
+    <string name="session_status_connected">Connected</string>
+    <string name="session_status_streaming">Connected — streaming %1$dx%2$d@%3$d</string>
+    <string name="session_status_failed">Failed: %1$s</string>
+    <string name="session_status_error">Error: %1$s</string>
+
+    <string name="label_camera">Camera</string>
+    <string name="label_orientation">Orientation</string>
+    <string name="orientation_helper">Reconnect to change</string>
+
+    <string name="opt_camera_back">Back</string>
+    <string name="opt_camera_front">Front</string>
+    <string name="opt_orientation_auto">Auto</string>
+    <string name="opt_orientation_portrait">Portrait</string>
+    <string name="opt_orientation_landscape">Landscape</string>
+
+    <string name="btn_connect">Connect</string>
+    <string name="btn_start_camera">Start camera</string>
+    <string name="btn_stop_camera">Stop camera</string>
+    <string name="btn_scan_again">Scan again</string>
+    <string name="btn_disconnect">Disconnect &amp; Exit session</string>
+
+    <string name="preview_content_description">Camera preview</string>
 </resources>
