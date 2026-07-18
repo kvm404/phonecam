@@ -1,11 +1,14 @@
 package com.kvm404.phonecam
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Size
 import android.view.View
+import android.view.WindowManager
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -77,6 +80,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Live H.264 encoder while streaming; null when idle or scanning. */
     private var videoEncoder: VideoEncoder? = null
+
+    /** Low-latency Wi-Fi lock held only while streaming; see [acquireStreamingLocks]. */
+    private var wifiLock: WifiManager.WifiLock? = null
 
     private var screenState = ScreenState.HOME
 
@@ -401,6 +407,7 @@ class MainActivity : AppCompatActivity() {
         videoEncoder = encoder
         encoder.start()
 
+        acquireStreamingLocks()
         sizePreviewCard(profile.width, profile.height)
         bindStreamingCamera()
         updateSessionUi()
@@ -410,8 +417,37 @@ class MainActivity : AppCompatActivity() {
         // Stop encoding + unbind the analyzer, but stay Connected so Start is available again.
         videoEncoder?.stop()
         videoEncoder = null
+        releaseStreamingLocks()
         unbindCamera()
         updateSessionUi()
+    }
+
+    /**
+     * Held only while streaming: keep the screen on (the user's stream must not die to the
+     * lock screen) and hold a low-latency Wi-Fi lock. Without the lock, Android's periodic
+     * Wi-Fi power-save/background-scan cycle takes the radio off-channel every ~10s, dropping
+     * an RTP burst and freezing the meeting feed until the next keyframe.
+     */
+    private fun acquireStreamingLocks() {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (wifiLock == null) {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                @Suppress("DEPRECATION")
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wifi.createWifiLock(mode, "phonecam:stream").apply {
+                setReferenceCounted(false)
+            }
+        }
+        wifiLock?.acquire()
+    }
+
+    private fun releaseStreamingLocks() {
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        wifiLock?.takeIf { it.isHeld }?.release()
     }
 
     /**
@@ -471,6 +507,7 @@ class MainActivity : AppCompatActivity() {
     private fun stopStreaming() {
         videoEncoder?.stop()
         videoEncoder = null
+        releaseStreamingLocks()
         rtpIdentity?.close()
         rtpIdentity = null
     }

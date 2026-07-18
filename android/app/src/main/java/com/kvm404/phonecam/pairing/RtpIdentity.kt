@@ -51,6 +51,13 @@ class RtpIdentity(
          */
         fun create(): RtpIdentity {
             val socket = DatagramSocket(0)
+            // Large send buffer so a paced keyframe burst never overflows the
+            // local socket queue (default is far below one 720p keyframe).
+            try {
+                socket.sendBufferSize = 1 shl 20
+            } catch (_: java.net.SocketException) {
+                // Best effort; the OS may clamp it.
+            }
             return RtpIdentity(randomSsrc(), socket.localPort, socket)
         }
     }
