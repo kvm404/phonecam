@@ -122,23 +122,23 @@ func TestParseStartFlagsOverridesPorts(t *testing.T) {
 	}
 }
 
-func TestParseStartFlagsAutoApprove(t *testing.T) {
+func TestParseStartFlagsApprovalDefaults(t *testing.T) {
 	var stderr bytes.Buffer
 
 	_, _, auto, _, ok := parseStartFlags(nil, &stderr)
 	if !ok {
 		t.Fatal("expected ok")
 	}
-	if auto {
-		t.Fatal("expected auto-approve to default to false")
+	if !auto {
+		t.Fatal("expected auto-approve to be the default")
 	}
 
-	_, _, auto, _, ok = parseStartFlags([]string{"--auto-approve"}, &stderr)
+	_, _, auto, _, ok = parseStartFlags([]string{"--require-approval"}, &stderr)
 	if !ok {
 		t.Fatal("expected ok")
 	}
-	if !auto {
-		t.Fatal("expected --auto-approve to enable auto approval")
+	if auto {
+		t.Fatal("expected --require-approval to disable auto approval")
 	}
 }
 
