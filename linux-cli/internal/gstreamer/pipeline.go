@@ -105,6 +105,10 @@ func PipelineArgs(config Config) ([]string, error) {
 		"-q",
 		"udpsrc",
 		"port=" + strconv.Itoa(config.RTPPort),
+		// Keyframes arrive as bursts of hundreds of RTP packets; the kernel's
+		// default UDP receive buffer (~212KB) overflows and drops fragments,
+		// which freezes the stream for a whole GOP. 4MB absorbs the burst.
+		"buffer-size=4194304",
 		"caps=" + rtpCaps,
 		"!",
 		"rtpjitterbuffer",
