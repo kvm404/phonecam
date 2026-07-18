@@ -48,8 +48,10 @@ class VideoEncoder(
                 setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
                 setInteger(MediaFormat.KEY_FRAME_RATE, profile.fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SECONDS)
-                // VBR and baseline profile are best-effort: not every device honours them.
-                trySet { setInteger(MediaFormat.KEY_BITRATE_MODE, VBR_MODE) }
+                // CBR keeps keyframes from spiking to many hundreds of KB (VBR
+                // keyframe bursts were fragmenting into packet floods that dropped
+                // and froze whole GOPs). Best-effort: not every device honours it.
+                trySet { setInteger(MediaFormat.KEY_BITRATE_MODE, CBR_MODE) }
                 trySet {
                     setInteger(
                         MediaFormat.KEY_PROFILE,
@@ -218,7 +220,7 @@ class VideoEncoder(
         private const val DEFAULT_BIT_RATE = 4_000_000
         private const val I_FRAME_INTERVAL_SECONDS = 1
         private const val SYNC_REQUEST_INTERVAL_SECONDS = 2
-        private const val VBR_MODE = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+        private const val CBR_MODE = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
         private const val DEQUEUE_TIMEOUT_US = 10_000L
         private const val STOP_JOIN_MS = 500L
     }
