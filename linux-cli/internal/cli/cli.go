@@ -140,6 +140,10 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // parseStartFlags parses the flags for `phonecam start`. It returns the
 // resolved ports and auto-approve setting; ok is false when the caller should
 // exit with the returned code (2 on an unknown/invalid flag, 0 on -h/--help).
+//
+// Pairing is auto-approved by default: the QR token already proves the phone
+// saw this machine's screen, so a second confirmation adds friction without
+// adding trust. --require-approval restores the interactive y/N prompt.
 func parseStartFlags(args []string, stderr io.Writer) (controlPort, rtpPort int, autoApprove bool, code int, ok bool) {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -149,14 +153,15 @@ func parseStartFlags(args []string, stderr io.Writer) (controlPort, rtpPort int,
 Start pairing and the Linux receiver.
 
 Flags:
-  --control-port int   TCP control port (0 = ephemeral/random) (default 47470)
-  --rtp-port int       UDP RTP port (0 = ephemeral/random) (default 47471)
-  --auto-approve       Approve the first phone to pair without prompting
+  --control-port int    TCP control port (0 = ephemeral/random) (default 47470)
+  --rtp-port int        UDP RTP port (0 = ephemeral/random) (default 47471)
+  --require-approval    Ask y/N before accepting a phone (default: auto-approve
+                        the phone that scanned the QR)
 `)
 	}
 	control := fs.Int("control-port", start.DefaultControlPort, "TCP control port (0 = ephemeral/random)")
 	rtp := fs.Int("rtp-port", start.DefaultRTPPort, "UDP RTP port (0 = ephemeral/random)")
-	auto := fs.Bool("auto-approve", false, "approve the first phone to pair without prompting")
+	requireApproval := fs.Bool("require-approval", false, "ask y/N before accepting a phone")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -164,7 +169,7 @@ Flags:
 		}
 		return 0, 0, false, 2, false
 	}
-	return *control, *rtp, *auto, 0, true
+	return *control, *rtp, !*requireApproval, 0, true
 }
 
 func printHelp(w io.Writer) {
@@ -176,7 +181,7 @@ Usage:
 Commands:
   start      Start pairing and the Linux receiver
              (flags: --control-port [47470], --rtp-port [47471]; 0 = random;
-              --auto-approve to skip the pairing prompt)
+              --require-approval to confirm each phone with a y/N prompt)
   smoke      Run a local RTP loopback self-test
   status     Show whether PhoneCam is running and its pairing state
   stop       Stop the running PhoneCam receiver
