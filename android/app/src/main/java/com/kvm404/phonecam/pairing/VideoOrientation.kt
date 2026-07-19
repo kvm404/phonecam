@@ -64,3 +64,25 @@ fun effectiveVideo(base: VideoProfile, mode: OrientationMode, bufferRotation: In
         }
     }
 }
+
+/**
+ * Per-frame rotation resolver for a live stream whose encoder dims were already committed at
+ * `/pair`. The activity now rotates with the device (see `configChanges` in the manifest), so
+ * `ImageProxy.imageInfo.rotationDegrees` changes mid-stream; the encoder dims, however, are
+ * fixed for the life of the connection.
+ *
+ * Given the phone's current [currentRotation], compute the frame's would-be AUTO profile:
+ * - if its dims equal the [committed] dims (same orientation class, e.g. a 180° flip or an
+ *   unchanged hold), use that rotation so the picture stays upright across the flip;
+ * - if its dims class differs (the user rotated 90° into the other orientation), fall back to
+ *   the [committed] rotation so the crop/rotate still lands exactly on the committed encoder
+ *   dims. The picture keeps the committed orientation — renegotiation is out of scope.
+ *
+ * Pure and Android-free so it is JVM-testable.
+ */
+fun frameRotation(base: VideoProfile, committed: EffectiveVideo, currentRotation: Int): Int {
+    val candidate = effectiveVideo(base, OrientationMode.AUTO, currentRotation)
+    val sameDims = candidate.profile.width == committed.profile.width &&
+        candidate.profile.height == committed.profile.height
+    return if (sameDims) candidate.rotationDegrees else committed.rotationDegrees
+}

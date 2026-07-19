@@ -38,6 +38,7 @@ import com.kvm404.phonecam.pairing.PairingState
 import com.kvm404.phonecam.pairing.PhoneIdentity
 import com.kvm404.phonecam.pairing.RtpIdentity
 import com.kvm404.phonecam.pairing.effectiveVideo
+import com.kvm404.phonecam.pairing.frameRotation
 import com.kvm404.phonecam.streaming.FrameConverter
 import com.kvm404.phonecam.streaming.RtpPacketizer
 import com.kvm404.phonecam.streaming.UdpRtpSender
@@ -51,14 +52,20 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 /**
- * Single-activity, three-screen UI (Home / Scan / Session) switched by [ScreenState]. All
+ * Single-activity, three-screen UI (Home / Scan / Live) switched by [ScreenState]. All
  * protocol + streaming machinery ([PairingController], [RtpIdentity], [FrameConverter],
  * [VideoEncoder], …) is reused unchanged; this class is only the UI/orchestration seam.
+ *
+ * The flow is deliberately gmeet-like: a valid QR IMMEDIATELY pairs, and on approval the app
+ * IMMEDIATELY starts streaming — no Connect / Start buttons in between. Orientation is
+ * automatic: the encoder dims are committed at `/pair` from the rotation observed while
+ * scanning, and the activity itself rotates with the device (see `configChanges` in the
+ * manifest) so the live stream survives rotation instead of being destroyed by a recreate.
  */
 @ExperimentalGetImage
 class MainActivity : AppCompatActivity() {
 
-    private enum class ScreenState { HOME, SCAN, SESSION }
+    private enum class ScreenState { HOME, SCAN, LIVE }
 
     private lateinit var binding: ActivityMainBinding
 
@@ -89,17 +96,20 @@ class MainActivity : AppCompatActivity() {
     /** The payload of the active session; null on Home. */
     private var payload: PairingPayload? = null
 
-    /** Latest pairing state; null in the "found — not connected" phase. */
-    private var pairingState: PairingState? = null
+    /**
+     * The encoder target committed at `/pair`: dims announced to the laptop and the rotation
+     * that made the scan-time buffer upright. Fixed for the life of the connection; the
+     * per-frame rotation is re-derived against it by [frameRotation] as the device rotates.
+     */
+    private var committedVideo: EffectiveVideo? = null
 
-    /** Options: default Back camera, Auto orientation. */
+    /** Selected camera; flips between back/front mid-stream via the flip button. */
     private var cameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-    private var orientationMode: OrientationMode = OrientationMode.AUTO
 
     /**
      * Camera rotation (0/90/180/270) needed to make frames upright, captured from analyzed
-     * frames during the scan phase. The activity is portrait-locked so this is constant; it
-     * seeds the /pair dims before streaming starts.
+     * frames during the scan phase. Whatever orientation the phone is held in while scanning
+     * seeds the committed `/pair` dims — this is the "automatic" orientation.
      */
     @Volatile
     private var cameraRotationDegrees = 0
@@ -136,7 +146,7 @@ class MainActivity : AppCompatActivity() {
             override fun handleOnBackPressed() {
                 when (screenState) {
                     ScreenState.SCAN -> teardownToHome(getString(R.string.home_status_not_connected))
-                    ScreenState.SESSION -> teardownToHome(getString(R.string.home_status_disconnected))
+                    ScreenState.LIVE -> teardownToHome(getString(R.string.home_status_disconnected))
                     ScreenState.HOME -> finish()
                 }
             }
@@ -149,32 +159,17 @@ class MainActivity : AppCompatActivity() {
         binding.scanCancelButton.setOnClickListener {
             teardownToHome(getString(R.string.home_status_not_connected))
         }
-        binding.connectButton.setOnClickListener { onConnectClicked() }
-        binding.startButton.setOnClickListener { onStartCameraClicked() }
-        binding.stopButton.setOnClickListener { onStopCameraClicked() }
-        binding.scanAgainButton.setOnClickListener { onScanConnectClicked() }
-        binding.disconnectButton.setOnClickListener {
+        binding.leaveButton.setOnClickListener {
             teardownToHome(getString(R.string.home_status_disconnected))
         }
-
-        binding.cameraToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked) return@addOnButtonCheckedListener
-            cameraSelector = if (checkedId == R.id.cameraFront) {
+        binding.flipCameraButton.setOnClickListener {
+            cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
                 CameraSelector.DEFAULT_FRONT_CAMERA
             } else {
                 CameraSelector.DEFAULT_BACK_CAMERA
             }
             // Rebind live so the switch takes effect while streaming (brief hiccup is fine).
             if (videoEncoder != null) bindStreamingCamera()
-        }
-
-        binding.orientationToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked) return@addOnButtonCheckedListener
-            orientationMode = when (checkedId) {
-                R.id.orientationPortrait -> OrientationMode.PORTRAIT
-                R.id.orientationLandscape -> OrientationMode.LANDSCAPE
-                else -> OrientationMode.AUTO
-            }
         }
     }
 
@@ -185,7 +180,7 @@ class MainActivity : AppCompatActivity() {
         binding.homeStatusText.text = status
         binding.homeContainer.visibility = View.VISIBLE
         binding.scanContainer.visibility = View.GONE
-        binding.sessionContainer.visibility = View.GONE
+        binding.liveContainer.visibility = View.GONE
     }
 
     private fun onScanConnectClicked() {
@@ -200,17 +195,18 @@ class MainActivity : AppCompatActivity() {
         screenState = ScreenState.SCAN
         handledPayload = false
         binding.homeContainer.visibility = View.GONE
-        binding.sessionContainer.visibility = View.GONE
+        binding.liveContainer.visibility = View.GONE
         binding.scanContainer.visibility = View.VISIBLE
         bindScanCamera()
     }
 
-    private fun showSession() {
-        screenState = ScreenState.SESSION
+    /** Enter the Live screen in its "connecting" state; pairing/streaming take over from here. */
+    private fun showLive() {
+        screenState = ScreenState.LIVE
         binding.homeContainer.visibility = View.GONE
         binding.scanContainer.visibility = View.GONE
-        binding.sessionContainer.visibility = View.VISIBLE
-        updateSessionUi()
+        binding.liveContainer.visibility = View.VISIBLE
+        updateLiveUi()
     }
 
     /** Full teardown of any active session/scan, then return to Home. */
@@ -221,7 +217,7 @@ class MainActivity : AppCompatActivity() {
         stopStreaming()
         unbindCamera()
         payload = null
-        pairingState = null
+        committedVideo = null
         showHome(status)
     }
 
@@ -244,7 +240,7 @@ class MainActivity : AppCompatActivity() {
                 cameraProvider = provider
                 action(provider)
             } catch (e: Exception) {
-                showSessionOrHomeError(e.localizedMessage ?: e.toString())
+                failToHome(e.localizedMessage ?: e.toString())
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -277,16 +273,16 @@ class MainActivity : AppCompatActivity() {
             try {
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
             } catch (e: Exception) {
-                showSessionOrHomeError(e.localizedMessage ?: e.toString())
+                failToHome(e.localizedMessage ?: e.toString())
             }
         }
     }
 
-    /** Bind the streaming pipeline (selected camera) to the small session preview card. */
+    /** Bind the streaming pipeline (selected camera) to the small live preview card. */
     private fun bindStreamingCamera() {
         withProvider { provider ->
             val preview = Preview.Builder().build().also {
-                it.surfaceProvider = binding.sessionPreview.surfaceProvider
+                it.surfaceProvider = binding.livePreview.surfaceProvider
             }
             val analysis = buildAnalysis(::analyzeForStreaming)
             imageAnalysis = analysis
@@ -294,7 +290,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 provider.bindToLifecycle(this, cameraSelector, preview, analysis)
             } catch (e: Exception) {
-                showSessionOrHomeError(e.localizedMessage ?: e.toString())
+                failToHome(e.localizedMessage ?: e.toString())
             }
         }
     }
@@ -336,31 +332,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** A valid QR was found: stop scanning, unbind the camera, and open the Session screen. */
+    /**
+     * A valid QR was found: stop scanning, unbind the camera, open the Live screen, and
+     * IMMEDIATELY begin pairing — no button in between.
+     */
     private fun onPayloadDetected(detected: PairingPayload) {
         imageAnalysis?.clearAnalyzer()
         unbindCamera()
         pairingJob?.cancel()
         pairingJob = null
         payload = detected
-        pairingState = null
-        showSession()
+        showLive()
+        startPairing()
     }
 
     // ------------------------------------------------------------------ Pairing
 
-    private fun onConnectClicked() {
+    /**
+     * Kick off the handshake straight away. The encoder dims are committed here from the
+     * scan-time rotation, and on [PairingState.Paired] streaming starts automatically.
+     */
+    private fun startPairing() {
         val current = payload ?: return
-        // Guard rapid taps: don't launch a second handshake while one is running or done.
+        // Guard rapid QR re-detections: don't launch a second handshake while one is running.
         if (pairingJob != null) return
 
-        // Orientation determines the /pair dims, so it is now locked for this connection.
-        binding.orientationToggle.isEnabled = false
-        binding.orientationHelper.visibility = View.VISIBLE
-
-        val committed = effectiveVideo(current.video, orientationMode, cameraRotationDegrees)
-        pairingState = PairingState.Pairing
-        updateSessionUi()
+        val committed = effectiveVideo(current.video, OrientationMode.AUTO, cameraRotationDegrees)
+        committedVideo = committed
+        updateLiveUi()
 
         pairingJob = lifecycleScope.launch {
             val rtp = withContext(Dispatchers.IO) { RtpIdentity.create() }
@@ -370,8 +369,11 @@ class MainActivity : AppCompatActivity() {
             launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     controller.state.collect { state ->
-                        pairingState = state
-                        updateSessionUi()
+                        when (state) {
+                            is PairingState.Paired -> startStreaming()
+                            is PairingState.Failed -> failToHome(state.message)
+                            else -> updateLiveUi()
+                        }
                     }
                 }
             }
@@ -381,28 +383,26 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ Streaming
 
-    private fun onStartCameraClicked() {
+    /** Auto-start: called on [PairingState.Paired]. Idempotent against rapid re-emission. */
+    private fun startStreaming() {
         val current = payload ?: return
-        if (pairingState !is PairingState.Paired) return
-        // Guard rapid taps.
+        val committed = committedVideo ?: return
+        // Guard double-start.
         if (videoEncoder != null) return
 
         val rtp = rtpIdentity
         val socket = rtp?.socket
         if (rtp == null || socket == null) {
-            showSessionOrHomeError("missing RTP socket")
+            failToHome("missing RTP socket")
             return
         }
 
-        // Encoder dims match the /pair dims: computed from the same base + mode + rotation.
-        val committed = effectiveVideo(current.video, orientationMode, cameraRotationDegrees)
         val profile = committed.profile
-
         val target = InetSocketAddress(current.rtpHost, current.rtpPort)
         val sender = UdpRtpSender(socket, target)
         val packetizer = RtpPacketizer(rtp.ssrc, RtpPacketizer.randomInitialSequenceNumber())
         val encoder = VideoEncoder(profile, packetizer, sender) { error ->
-            runOnUiThread { showSessionOrHomeError(error.localizedMessage ?: error.toString()) }
+            runOnUiThread { failToHome(error.localizedMessage ?: error.toString()) }
         }
         videoEncoder = encoder
         encoder.start()
@@ -410,16 +410,7 @@ class MainActivity : AppCompatActivity() {
         acquireStreamingLocks()
         sizePreviewCard(profile.width, profile.height)
         bindStreamingCamera()
-        updateSessionUi()
-    }
-
-    private fun onStopCameraClicked() {
-        // Stop encoding + unbind the analyzer, but stay Connected so Start is available again.
-        videoEncoder?.stop()
-        videoEncoder = null
-        releaseStreamingLocks()
-        unbindCamera()
-        updateSessionUi()
+        updateLiveUi()
     }
 
     /**
@@ -452,26 +443,28 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Streaming-mode analyzer: center-crop the landscape sensor buffer to the pre-rotation
-     * target for the chosen orientation, rotate it onto the committed encoder dims, then feed
-     * the encoder. Both dims and rotation come from [effectiveVideo] so front/back switches
-     * (rotation re-read per frame) and forced-orientation modes stay consistent.
+     * target for the committed encoder dims, rotate it onto those dims, then feed the encoder.
+     *
+     * The rotation is re-derived per frame by [frameRotation] against the committed profile, so
+     * the picture stays upright across 180° flips and same-class rotations, and falls back to
+     * the committed rotation (keeping the committed orientation) when the device is turned 90°
+     * into the other orientation class. Front/back switches re-read the rotation the same way.
      */
     private fun analyzeForStreaming(imageProxy: ImageProxy) {
         try {
-            val current = payload
+            val current = payload ?: return
+            val committed = committedVideo ?: return
             val degrees = imageProxy.imageInfo.rotationDegrees
-            val eff: EffectiveVideo? =
-                current?.let { effectiveVideo(it.video, orientationMode, degrees) }
-            val rotation = eff?.rotationDegrees ?: 0
+            val rotation = frameRotation(current.video, committed, degrees)
             // Pre-rotation crop target: undo the swap that [rotation] will re-apply.
             val cropWidth: Int
             val cropHeight: Int
             if (rotation == 90 || rotation == 270) {
-                cropWidth = eff?.profile?.height ?: 0
-                cropHeight = eff?.profile?.width ?: 0
+                cropWidth = committed.profile.height
+                cropHeight = committed.profile.width
             } else {
-                cropWidth = eff?.profile?.width ?: 0
-                cropHeight = eff?.profile?.height ?: 0
+                cropWidth = committed.profile.width
+                cropHeight = committed.profile.height
             }
             val planes = imageProxy.planes
             val cropped = FrameConverter.toFrameData(
@@ -495,7 +488,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: IllegalArgumentException) {
             // Unrecoverable geometry problem (frame smaller than the encoder target):
             // surface it instead of silently dropping every frame.
-            runOnUiThread { showSessionOrHomeError(e.message ?: e.toString()) }
+            runOnUiThread { failToHome(e.message ?: e.toString()) }
         } catch (_: Exception) {
             // Drop this frame; a transient conversion/encode error must not stop the stream.
         } finally {
@@ -512,81 +505,40 @@ class MainActivity : AppCompatActivity() {
         rtpIdentity = null
     }
 
-    // ------------------------------------------------------------------ Session UI
+    // ------------------------------------------------------------------ Live UI
 
-    /** Render the Session screen from [payload], [pairingState] and the streaming flag. */
-    private fun updateSessionUi() {
-        if (screenState != ScreenState.SESSION) return
+    /** Render the Live screen: "connecting" until streaming, then "Live — <laptop>". */
+    private fun updateLiveUi() {
+        if (screenState != ScreenState.LIVE) return
         val current = payload ?: return
-        binding.sessionName.text = current.name
-
         val streaming = videoEncoder != null
-        val state = pairingState
-
-        // Default everything hidden, then reveal per state.
-        binding.connectButton.visibility = View.GONE
-        binding.startButton.visibility = View.GONE
-        binding.stopButton.visibility = View.GONE
-        binding.scanAgainButton.visibility = View.GONE
-        binding.previewCard.visibility = View.GONE
-
-        when (state) {
-            null -> {
-                binding.sessionStatus.text =
-                    getString(R.string.session_status_found, current.name)
-                binding.connectButton.visibility = View.VISIBLE
-                binding.orientationToggle.isEnabled = true
-                binding.orientationHelper.visibility = View.GONE
-            }
-            PairingState.Idle, PairingState.Pairing -> {
-                binding.sessionStatus.text = getString(R.string.session_status_pairing)
-            }
-            PairingState.WaitingApproval -> {
-                binding.sessionStatus.text =
-                    getString(R.string.session_status_waiting, current.name)
-            }
-            is PairingState.Paired -> {
-                if (streaming) {
-                    val encDims = effectiveVideo(current.video, orientationMode, cameraRotationDegrees)
-                    binding.sessionStatus.text = getString(
-                        R.string.session_status_streaming,
-                        encDims.profile.width,
-                        encDims.profile.height,
-                        encDims.profile.fps,
-                    )
-                    binding.stopButton.visibility = View.VISIBLE
-                    binding.previewCard.visibility = View.VISIBLE
-                } else {
-                    binding.sessionStatus.text = getString(R.string.session_status_connected)
-                    binding.startButton.visibility = View.VISIBLE
-                }
-            }
-            is PairingState.Failed -> {
-                binding.sessionStatus.text =
-                    getString(R.string.session_status_failed, state.message)
-                binding.scanAgainButton.visibility = View.VISIBLE
-            }
+        if (streaming) {
+            binding.liveStatus.text = getString(R.string.live_status, current.name)
+            binding.previewCard.visibility = View.VISIBLE
+            binding.flipCameraButton.visibility = View.VISIBLE
+            binding.leaveButton.visibility = View.VISIBLE
+        } else {
+            binding.liveStatus.text = getString(R.string.live_connecting, current.name)
+            binding.previewCard.visibility = View.GONE
+            binding.flipCameraButton.visibility = View.GONE
+            binding.leaveButton.visibility = View.GONE
         }
     }
 
-    /** Size the preview card to ~half the screen width, matching the stream aspect ratio. */
+    /** Size the preview card to ~half the screen width, matching the committed aspect ratio. */
     private fun sizePreviewCard(streamWidth: Int, streamHeight: Int) {
         if (streamWidth <= 0 || streamHeight <= 0) return
         val cardWidth = resources.displayMetrics.widthPixels / 2
         val cardHeight = (cardWidth.toLong() * streamHeight / streamWidth).toInt()
-        val params = binding.sessionPreview.layoutParams
+        val params = binding.livePreview.layoutParams
         params.width = cardWidth
         params.height = cardHeight
-        binding.sessionPreview.layoutParams = params
+        binding.livePreview.layoutParams = params
     }
 
-    private fun showSessionOrHomeError(message: String) {
-        val text = getString(R.string.home_status_error, message)
-        if (screenState == ScreenState.SESSION) {
-            binding.sessionStatus.text = getString(R.string.session_status_error, message)
-        } else {
-            binding.homeStatusText.text = text
-        }
+    /** Any pairing/streaming failure: surface the reason on Home's status card and return Home. */
+    private fun failToHome(message: String) {
+        teardownToHome(getString(R.string.home_status_error, message))
     }
 
     override fun onDestroy() {

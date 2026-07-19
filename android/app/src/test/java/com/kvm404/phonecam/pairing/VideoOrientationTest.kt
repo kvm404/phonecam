@@ -98,4 +98,48 @@ class VideoOrientationTest {
         assertEquals(24, effectiveVideo(profile, OrientationMode.PORTRAIT, 0).profile.fps)
         assertEquals(24, effectiveVideo(profile, OrientationMode.LANDSCAPE, 0).profile.fps)
     }
+
+    // --- frameRotation: mid-stream rotation against a committed profile ---
+
+    // Committed portrait (scanned holding the phone upright: rotation 90 -> 720x1280@90).
+    private val portraitCommitted = effectiveVideo(base, OrientationMode.AUTO, 90)
+
+    // Committed landscape (scanned holding the phone sideways: rotation 0 -> 1280x720@0).
+    private val landscapeCommitted = effectiveVideo(base, OrientationMode.AUTO, 0)
+
+    @Test
+    fun `frameRotation portrait committed same rotation keeps current`() {
+        assertEquals(90, frameRotation(base, portraitCommitted, 90))
+    }
+
+    @Test
+    fun `frameRotation portrait committed 180 flip uses current rotation`() {
+        // 90 -> 270 is a 180° flip; dims stay portrait, so track the flip to stay upright.
+        assertEquals(270, frameRotation(base, portraitCommitted, 270))
+    }
+
+    @Test
+    fun `frameRotation portrait committed 90 class change falls back to committed`() {
+        // Current 0 would be landscape dims (differs) -> fall back to committed rotation 90.
+        assertEquals(90, frameRotation(base, portraitCommitted, 0))
+        assertEquals(90, frameRotation(base, portraitCommitted, 180))
+    }
+
+    @Test
+    fun `frameRotation landscape committed same rotation keeps current`() {
+        assertEquals(0, frameRotation(base, landscapeCommitted, 0))
+    }
+
+    @Test
+    fun `frameRotation landscape committed 180 flip uses current rotation`() {
+        // 0 -> 180 is a 180° flip; dims stay landscape, so track the flip to stay upright.
+        assertEquals(180, frameRotation(base, landscapeCommitted, 180))
+    }
+
+    @Test
+    fun `frameRotation landscape committed 90 class change falls back to committed`() {
+        // Current 90 would be portrait dims (differs) -> fall back to committed rotation 0.
+        assertEquals(0, frameRotation(base, landscapeCommitted, 90))
+        assertEquals(0, frameRotation(base, landscapeCommitted, 270))
+    }
 }

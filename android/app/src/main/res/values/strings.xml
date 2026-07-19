@@ -15,30 +15,11 @@
     <string name="scan_hint">Scan the QR from phonecam start</string>
     <string name="btn_cancel">Cancel</string>
 
-    <!-- Session screen -->
-    <string name="session_status_found">Found %1$s — not connected</string>
-    <string name="session_status_pairing">Pairing…</string>
-    <string name="session_status_waiting">Waiting for approval on %1$s… (check the laptop terminal)</string>
-    <string name="session_status_connected">Connected</string>
-    <string name="session_status_streaming">Connected — streaming %1$dx%2$d@%3$d</string>
-    <string name="session_status_failed">Failed: %1$s</string>
-    <string name="session_status_error">Error: %1$s</string>
-
-    <string name="label_camera">Camera</string>
-    <string name="label_orientation">Orientation</string>
-    <string name="orientation_helper">Reconnect to change</string>
-
-    <string name="opt_camera_back">Back</string>
-    <string name="opt_camera_front">Front</string>
-    <string name="opt_orientation_auto">Auto</string>
-    <string name="opt_orientation_portrait">Portrait</string>
-    <string name="opt_orientation_landscape">Landscape</string>
-
-    <string name="btn_connect">Connect</string>
-    <string name="btn_start_camera">Start camera</string>
-    <string name="btn_stop_camera">Stop camera</string>
-    <string name="btn_scan_again">Scan again</string>
-    <string name="btn_disconnect">Disconnect &amp; Exit session</string>
+    <!-- Live screen -->
+    <string name="live_connecting">Connecting to %1$s…</string>
+    <string name="live_status">Live — %1$s</string>
+    <string name="btn_flip_camera">Flip camera</string>
+    <string name="btn_leave">Leave</string>
 
     <string name="preview_content_description">Camera preview</string>
 </resources>
