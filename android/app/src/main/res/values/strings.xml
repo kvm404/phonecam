@@ -22,4 +22,10 @@
     <string name="btn_leave">Leave</string>
 
     <string name="preview_content_description">Camera preview</string>
+    <string name="live_battery_hint">For reliable background streaming, allow PhoneCam unrestricted battery usage.</string>
+
+    <!-- Foreground service notification -->
+    <string name="notification_channel_name">PhoneCam</string>
+    <string name="notification_content">Streaming to %1$s</string>
+    <string name="notification_stop">Stop</string>
 </resources>

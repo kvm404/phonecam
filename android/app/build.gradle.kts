@@ -44,6 +44,7 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.androidx.activity.ktx)
+    implementation(libs.androidx.lifecycle.service)
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
