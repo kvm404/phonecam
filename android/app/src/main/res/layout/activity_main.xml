@@ -112,9 +112,9 @@
 
     </FrameLayout>
 
-    <!-- =========================== SESSION =========================== -->
+    <!-- ============================ LIVE ============================ -->
     <ScrollView
-        android:id="@+id/sessionContainer"
+        android:id="@+id/liveContainer"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:fillViewport="true"
@@ -124,109 +124,21 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center_horizontal"
             android:orientation="vertical"
             android:padding="24dp">
 
             <TextView
-                android:id="@+id/sessionName"
-                android:layout_width="match_parent"
+                android:id="@+id/liveStatus"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:text="@string/app_name"
-                android:textAppearance="?attr/textAppearanceHeadlineSmall"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/sessionStatus"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="@string/session_status_found"
+                android:layout_marginTop="24dp"
+                android:gravity="center"
+                android:text="@string/live_connecting"
                 android:textAppearance="?attr/textAppearanceBodyLarge" />
 
-            <!-- Camera option -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="28dp"
-                android:text="@string/label_camera"
-                android:textAppearance="?attr/textAppearanceLabelLarge" />
-
-            <com.google.android.material.button.MaterialButtonToggleGroup
-                android:id="@+id/cameraToggle"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                app:selectionRequired="true"
-                app:singleSelection="true">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/cameraBack"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:checked="true"
-                    android:text="@string/opt_camera_back"
-                    style="?attr/materialButtonOutlinedStyle" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/cameraFront"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/opt_camera_front"
-                    style="?attr/materialButtonOutlinedStyle" />
-
-            </com.google.android.material.button.MaterialButtonToggleGroup>
-
-            <!-- Orientation option -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:text="@string/label_orientation"
-                android:textAppearance="?attr/textAppearanceLabelLarge" />
-
-            <com.google.android.material.button.MaterialButtonToggleGroup
-                android:id="@+id/orientationToggle"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                app:selectionRequired="true"
-                app:singleSelection="true">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/orientationAuto"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:checked="true"
-                    android:text="@string/opt_orientation_auto"
-                    style="?attr/materialButtonOutlinedStyle" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/orientationPortrait"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/opt_orientation_portrait"
-                    style="?attr/materialButtonOutlinedStyle" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/orientationLandscape"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/opt_orientation_landscape"
-                    style="?attr/materialButtonOutlinedStyle" />
-
-            </com.google.android.material.button.MaterialButtonToggleGroup>
-
-            <TextView
-                android:id="@+id/orientationHelper"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="@string/orientation_helper"
-                android:textAppearance="?attr/textAppearanceBodySmall"
-                android:visibility="gone" />
-
-            <!-- Streaming preview card (small, not fullscreen) -->
+            <!-- Streaming preview card (small, keeps committed aspect ratio) -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/previewCard"
                 android:layout_width="wrap_content"
@@ -238,57 +150,34 @@
                 app:cardElevation="2dp">
 
                 <androidx.camera.view.PreviewView
-                    android:id="@+id/sessionPreview"
+                    android:id="@+id/livePreview"
                     android:layout_width="180dp"
                     android:layout_height="320dp"
                     android:contentDescription="@string/preview_content_description" />
 
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Action buttons -->
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/connectButton"
-                android:layout_width="match_parent"
+                android:id="@+id/flipCameraButton"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="28dp"
-                android:paddingVertical="14dp"
-                android:text="@string/btn_connect" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/startButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="28dp"
-                android:paddingVertical="14dp"
-                android:text="@string/btn_start_camera"
-                android:visibility="gone" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/stopButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:paddingVertical="14dp"
-                android:text="@string/btn_stop_camera"
+                android:layout_marginTop="24dp"
+                android:paddingVertical="12dp"
+                android:text="@string/btn_flip_camera"
                 android:visibility="gone"
+                app:icon="@android:drawable/ic_menu_camera"
                 style="?attr/materialButtonOutlinedStyle" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/scanAgainButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="28dp"
-                android:paddingVertical="14dp"
-                android:text="@string/btn_scan_again"
-                android:visibility="gone" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/disconnectButton"
-                android:layout_width="match_parent"
+                android:id="@+id/leaveButton"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
-                android:text="@string/btn_disconnect"
-                style="@style/Widget.Material3.Button.TextButton" />
+                android:minWidth="160dp"
+                android:paddingVertical="14dp"
+                android:text="@string/btn_leave"
+                android:visibility="gone"
+                app:backgroundTint="?attr/colorError" />
 
         </LinearLayout>
     </ScrollView>
