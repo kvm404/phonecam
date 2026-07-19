@@ -7,6 +7,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Size
+import android.view.OrientationEventListener
 import android.view.View
 import android.view.WindowManager
 import androidx.activity.OnBackPressedCallback
@@ -29,16 +30,16 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.kvm404.phonecam.databinding.ActivityMainBinding
-import com.kvm404.phonecam.pairing.EffectiveVideo
 import com.kvm404.phonecam.pairing.HttpControlClient
-import com.kvm404.phonecam.pairing.OrientationMode
 import com.kvm404.phonecam.pairing.PairingController
 import com.kvm404.phonecam.pairing.PairingPayload
 import com.kvm404.phonecam.pairing.PairingState
 import com.kvm404.phonecam.pairing.PhoneIdentity
 import com.kvm404.phonecam.pairing.RtpIdentity
-import com.kvm404.phonecam.pairing.effectiveVideo
-import com.kvm404.phonecam.pairing.frameRotation
+import com.kvm404.phonecam.pairing.VideoProfile
+import com.kvm404.phonecam.pairing.deviceOrientationToSurfaceRotation
+import com.kvm404.phonecam.pairing.quantizeOrientation
+import com.kvm404.phonecam.streaming.CanvasComposer
 import com.kvm404.phonecam.streaming.FrameConverter
 import com.kvm404.phonecam.streaming.RtpPacketizer
 import com.kvm404.phonecam.streaming.UdpRtpSender
@@ -57,10 +58,14 @@ import java.util.concurrent.Executors
  * [VideoEncoder], …) is reused unchanged; this class is only the UI/orchestration seam.
  *
  * The flow is deliberately gmeet-like: a valid QR IMMEDIATELY pairs, and on approval the app
- * IMMEDIATELY starts streaming — no Connect / Start buttons in between. Orientation is
- * automatic: the encoder dims are committed at `/pair` from the rotation observed while
- * scanning, and the activity itself rotates with the device (see `configChanges` in the
- * manifest) so the live stream survives rotation instead of being destroyed by a recreate.
+ * IMMEDIATELY starts streaming — no Connect / Start buttons in between.
+ *
+ * Orientation is gmeet-like too: the encoder and `/pair` dims are ALWAYS the payload's base
+ * landscape profile (the "canvas") and are never swapped or renegotiated. Rotation is handled
+ * per frame on the phone — a sensor-driven [OrientationEventListener] sets the ImageAnalysis
+ * targetRotation so every frame's `rotationDegrees` is the correct upright rotation (including
+ * reverse orientations), and [CanvasComposer] pillarboxes portrait content back onto the fixed
+ * canvas. Because the dims never change, rotating mid-stream is instant and glitch-free.
  */
 @ExperimentalGetImage
 class MainActivity : AppCompatActivity() {
@@ -97,22 +102,24 @@ class MainActivity : AppCompatActivity() {
     private var payload: PairingPayload? = null
 
     /**
-     * The encoder target committed at `/pair`: dims announced to the laptop and the rotation
-     * that made the scan-time buffer upright. Fixed for the life of the connection; the
-     * per-frame rotation is re-derived against it by [frameRotation] as the device rotates.
+     * The fixed canvas profile: the payload's base landscape dims, announced verbatim at
+     * `/pair` and fed to the encoder. Never swapped or renegotiated — all rotation handling is
+     * per-frame composition onto these dims. Fixed for the life of the connection.
      */
-    private var committedVideo: EffectiveVideo? = null
+    private var committedProfile: VideoProfile? = null
 
     /** Selected camera; flips between back/front mid-stream via the flip button. */
     private var cameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
     /**
-     * Camera rotation (0/90/180/270) needed to make frames upright, captured from analyzed
-     * frames during the scan phase. Whatever orientation the phone is held in while scanning
-     * seeds the committed `/pair` dims — this is the "automatic" orientation.
+     * Current quantized device orientation (0/90/180/270), driven by [orientationListener]
+     * while streaming. Read to seed a freshly-bound analyzer's targetRotation.
      */
     @Volatile
-    private var cameraRotationDegrees = 0
+    private var deviceOrientation = 0
+
+    /** Sensor listener active only while streaming; drives the analyzer targetRotation. */
+    private var orientationListener: OrientationEventListener? = null
 
     /** Guards so only the first successfully-parsed payload triggers a session. */
     @Volatile
@@ -217,7 +224,7 @@ class MainActivity : AppCompatActivity() {
         stopStreaming()
         unbindCamera()
         payload = null
-        committedVideo = null
+        committedProfile = null
         showHome(status)
     }
 
@@ -285,6 +292,9 @@ class MainActivity : AppCompatActivity() {
                 it.surfaceProvider = binding.livePreview.surfaceProvider
             }
             val analysis = buildAnalysis(::analyzeForStreaming)
+            // Seed the freshly-bound analyzer with the current device orientation so the first
+            // frames (and any post-flip frames) are already upright before the sensor next fires.
+            analysis.targetRotation = deviceOrientationToSurfaceRotation(deviceOrientation)
             imageAnalysis = analysis
             provider.unbindAll()
             try {
@@ -309,7 +319,6 @@ class MainActivity : AppCompatActivity() {
             imageProxy.close()
             return
         }
-        cameraRotationDegrees = imageProxy.imageInfo.rotationDegrees
         val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
         barcodeScanner.process(image)
             .addOnSuccessListener { barcodes -> handleBarcodes(barcodes) }
@@ -349,23 +358,24 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ Pairing
 
     /**
-     * Kick off the handshake straight away. The encoder dims are committed here from the
-     * scan-time rotation, and on [PairingState.Paired] streaming starts automatically.
+     * Kick off the handshake straight away. The encoder/`/pair` dims are the payload's base
+     * landscape canvas verbatim — never swapped — and on [PairingState.Paired] streaming starts
+     * automatically. Rotation is handled per frame, so nothing about orientation is committed here.
      */
     private fun startPairing() {
         val current = payload ?: return
         // Guard rapid QR re-detections: don't launch a second handshake while one is running.
         if (pairingJob != null) return
 
-        val committed = effectiveVideo(current.video, OrientationMode.AUTO, cameraRotationDegrees)
-        committedVideo = committed
+        val committed = current.video
+        committedProfile = committed
         updateLiveUi()
 
         pairingJob = lifecycleScope.launch {
             val rtp = withContext(Dispatchers.IO) { RtpIdentity.create() }
             rtpIdentity = rtp
             val controller =
-                PairingController(HttpControlClient(), phoneIdentity, rtp, committed.profile)
+                PairingController(HttpControlClient(), phoneIdentity, rtp, committed)
             launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     controller.state.collect { state ->
@@ -386,7 +396,7 @@ class MainActivity : AppCompatActivity() {
     /** Auto-start: called on [PairingState.Paired]. Idempotent against rapid re-emission. */
     private fun startStreaming() {
         val current = payload ?: return
-        val committed = committedVideo ?: return
+        val profile = committedProfile ?: return
         // Guard double-start.
         if (videoEncoder != null) return
 
@@ -397,7 +407,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val profile = committed.profile
         val target = InetSocketAddress(current.rtpHost, current.rtpPort)
         val sender = UdpRtpSender(socket, target)
         val packetizer = RtpPacketizer(rtp.ssrc, RtpPacketizer.randomInitialSequenceNumber())
@@ -408,9 +417,33 @@ class MainActivity : AppCompatActivity() {
         encoder.start()
 
         acquireStreamingLocks()
+        startOrientationTracking()
         sizePreviewCard(profile.width, profile.height)
         bindStreamingCamera()
         updateLiveUi()
+    }
+
+    /**
+     * Track the physical device orientation while streaming. A UI rotation is not enough:
+     * Android will not report reverse-portrait, and `configChanges` masks some transitions.
+     * The sensor value is quantized to 0/90/180/270 and mapped to the ImageAnalysis
+     * targetRotation, which makes each frame's `rotationDegrees` the correct upright rotation.
+     */
+    private fun startOrientationTracking() {
+        val listener = orientationListener ?: object : OrientationEventListener(this) {
+            override fun onOrientationChanged(orientation: Int) {
+                val quantized = quantizeOrientation(orientation, deviceOrientation)
+                if (quantized != deviceOrientation) {
+                    deviceOrientation = quantized
+                    imageAnalysis?.targetRotation = deviceOrientationToSurfaceRotation(quantized)
+                }
+            }
+        }.also { orientationListener = it }
+        if (listener.canDetectOrientation()) listener.enable()
+    }
+
+    private fun stopOrientationTracking() {
+        orientationListener?.disable()
     }
 
     /**
@@ -442,30 +475,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Streaming-mode analyzer: center-crop the landscape sensor buffer to the pre-rotation
-     * target for the committed encoder dims, rotate it onto those dims, then feed the encoder.
+     * Streaming-mode analyzer, fixed-canvas pipeline. Uniform for every rotation:
+     *  1. center-crop the landscape sensor buffer to the canvas dims (undoes a wider sensor,
+     *     e.g. 1600x720 -> 1280x720);
+     *  2. rotate by the sensor-correct `rotationDegrees` — 0/180 keep canvas dims, 90/270 swap
+     *     to portrait (720x1280);
+     *  3. compose back onto the fixed canvas — a no-op for landscape, a centered pillarbox for
+     *     portrait — so the encoder always receives exactly the canvas dims.
      *
-     * The rotation is re-derived per frame by [frameRotation] against the committed profile, so
-     * the picture stays upright across 180° flips and same-class rotations, and falls back to
-     * the committed rotation (keeping the committed orientation) when the device is turned 90°
-     * into the other orientation class. Front/back switches re-read the rotation the same way.
+     * The encoder/`/pair` dims never change, so rotating mid-stream (including reverse
+     * orientations) is instant and needs no renegotiation. Front/back flips re-read the
+     * rotation the same way.
      */
     private fun analyzeForStreaming(imageProxy: ImageProxy) {
         try {
-            val current = payload ?: return
-            val committed = committedVideo ?: return
-            val degrees = imageProxy.imageInfo.rotationDegrees
-            val rotation = frameRotation(current.video, committed, degrees)
-            // Pre-rotation crop target: undo the swap that [rotation] will re-apply.
-            val cropWidth: Int
-            val cropHeight: Int
-            if (rotation == 90 || rotation == 270) {
-                cropWidth = committed.profile.height
-                cropHeight = committed.profile.width
-            } else {
-                cropWidth = committed.profile.width
-                cropHeight = committed.profile.height
-            }
+            val canvas = committedProfile ?: return
+            val rotation = imageProxy.imageInfo.rotationDegrees
             val planes = imageProxy.planes
             val cropped = FrameConverter.toFrameData(
                 width = imageProxy.width,
@@ -480,10 +505,11 @@ class MainActivity : AppCompatActivity() {
                 vRowStride = planes[2].rowStride,
                 vPixelStride = planes[2].pixelStride,
                 timestampUs = imageProxy.imageInfo.timestamp / 1000,
-                targetWidth = cropWidth,
-                targetHeight = cropHeight,
+                targetWidth = canvas.width,
+                targetHeight = canvas.height,
             )
-            val frame = FrameConverter.rotate(cropped, rotation)
+            val rotated = FrameConverter.rotate(cropped, rotation)
+            val frame = CanvasComposer.compose(rotated, canvas.width, canvas.height)
             videoEncoder?.encode(frame)
         } catch (e: IllegalArgumentException) {
             // Unrecoverable geometry problem (frame smaller than the encoder target):
@@ -500,6 +526,7 @@ class MainActivity : AppCompatActivity() {
     private fun stopStreaming() {
         videoEncoder?.stop()
         videoEncoder = null
+        stopOrientationTracking()
         releaseStreamingLocks()
         rtpIdentity?.close()
         rtpIdentity = null
@@ -545,6 +572,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         pairingJob?.cancel()
         stopStreaming()
+        orientationListener?.disable()
         imageAnalysis?.clearAnalyzer()
         cameraProvider?.unbindAll()
         analysisExecutor.shutdown()
