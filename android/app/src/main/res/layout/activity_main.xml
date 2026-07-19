@@ -138,6 +138,17 @@
                 android:text="@string/live_connecting"
                 android:textAppearance="?attr/textAppearanceBodyLarge" />
 
+            <TextView
+                android:id="@+id/liveBatteryHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center"
+                android:text="@string/live_battery_hint"
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
             <!-- Streaming preview card (small, keeps committed aspect ratio) -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/previewCard"
