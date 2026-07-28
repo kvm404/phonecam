@@ -60,8 +60,7 @@ Do not merge until:
 - review is complete,
 - requested changes are resolved,
 - tests or manual verification are documented,
-- the maintainer has explicitly approved continuing.
+- a maintainer has explicitly approved the change.
 
-For this project workflow, Codex should stop before merging, summarize the PR,
-and ask whether to continue.
+Merging is done by a maintainer once the PR is approved and CI is green.
 

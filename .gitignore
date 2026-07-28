@@ -13,3 +13,9 @@ dist/
 out/
 tmp/
 
+# Signing secrets
+keystore.properties
+android/keystore.properties
+*.jks
+*.keystore
+
