@@ -19,7 +19,8 @@ import (
 	"github.com/kvm404/phonecam/linux-cli/internal/start"
 )
 
-const version = "0.0.0-dev"
+var version = "0.1.0"
+
 const writeAccess = 2
 
 type OSSystem struct{}

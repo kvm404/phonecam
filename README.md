@@ -1,10 +1,8 @@
 # PhoneCam Linux
 
-PhoneCam Linux is an open-source, Linux-first tool for using an Android phone
-camera as a high-quality virtual webcam on Linux.
-
-The v0.1 target is a local-network Android camera pipeline that appears to Linux
-meeting and recording apps as a normal `v4l2loopback` webcam.
+Use your Android phone as a high-quality virtual webcam on Linux, over your
+local network, appearing to Meet/Zoom/Discord/OBS as a normal `v4l2loopback`
+camera.
 
 ```text
 Android CameraX
@@ -15,43 +13,89 @@ Android CameraX
   -> Meet / Zoom / Discord / OBS / browsers
 ```
 
-## v0.1 Goals
+## Status & Scope
 
-- 720p30 video.
-- Under 180 ms glass-to-browser latency on good Wi-Fi.
-- Under 25% laptop CPU on a midrange Linux machine.
-- Stable 90-minute sessions.
-- Visible in Google Meet, Zoom, Discord, OBS, Chromium, and Firefox.
-- No account, cloud video relay, or default TURN dependency.
-- Excellent `phonecam doctor` diagnostics for Linux setup issues.
+PhoneCam is **v0.1** and early. It has been verified on **one** reference setup
+only:
 
-## Planned Components
+- **Linux:** Arch Linux.
+- **Android:** one vivo device (Android 10+).
 
-- `android/`: Kotlin Android app using CameraX and MediaCodec.
-- `linux-cli/`: Go CLI for pairing, diagnostics, process lifecycle, and
-  GStreamer orchestration.
-- `docs/`: product, technical, testing, roadmap, and workflow documentation.
+Other distros and phones are **untested** — they may work, and community help to
+confirm them is very welcome. See the
+[Compatibility Matrix](docs/COMPATIBILITY_MATRIX.md).
 
-## Planned CLI
+**Not yet:** audio (video-only for now) and on-the-wire encryption.
 
-```text
-phonecam start
-phonecam status
-phonecam stop
+## Security & Privacy
+
+- **Local network only.** There is no account, no cloud, and no video relay —
+  the stream goes directly from your phone to your Linux machine over the LAN.
+- **The RTP video stream is currently UNENCRYPTED** on the local network.
+- **Pairing uses a short-lived, single-use QR token** that the phone scans off
+  your screen.
+- Use PhoneCam on **trusted networks only** (home/office Wi-Fi), not on shared
+  or public networks.
+
+## Install (Linux CLI)
+
+**Option A — prebuilt binary (recommended):** download the binary for your
+architecture from the [Releases](https://github.com/kvm404/phonecam/releases)
+page, then:
+
+```sh
+chmod +x phonecam-linux-amd64
+sudo mv phonecam-linux-amd64 /usr/local/bin/phonecam
+```
+
+**Option B — build from source (Go 1.22+):**
+
+```sh
+cd linux-cli
+go build -o phonecam ./cmd/phonecam
+```
+
+Then check your setup and install the Linux dependencies (GStreamer, firewall
+rules, `v4l2loopback`):
+
+```sh
 phonecam doctor
 phonecam install
 ```
 
-Future service-mode commands are planned after the local Wi-Fi MVP:
+## Install (Android)
 
-```text
-phonecam service enable
-phonecam service disable
+Sideload the APK from the
+[Releases](https://github.com/kvm404/phonecam/releases) page (you may need to
+enable installing from unknown sources), or build it yourself:
+
+```sh
+cd android
+./gradlew assembleDebug
 ```
 
-## Project Status
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
-This repository is in planning/pre-implementation. See:
+## Quickstart
+
+1. On the laptop, run `phonecam start`. A QR code is shown for pairing.
+2. Open the PhoneCam app on your phone and **Scan QR**.
+3. You're live — the phone camera is now streaming to the virtual webcam.
+4. In Meet, Zoom, Discord, or OBS, pick **PhoneCam** as the camera.
+
+Use `phonecam status` to see whether it's running and `phonecam stop` to stop
+it.
+
+## Requirements
+
+- **Linux** with GStreamer and `v4l2loopback`. Run `phonecam install` for the
+  exact per-distro packages, the `modprobe` command, and firewall rules.
+- **Android 10+** (minSdk 26).
+- Phone and laptop on the **same LAN**.
+
+## Documentation
+
+Design and product docs live in [`docs/`](docs/):
 
 - [Product Requirements](docs/PRD.md)
 - [Technical Design](docs/TECHNICAL_DESIGN.md)
@@ -59,4 +103,8 @@ This repository is in planning/pre-implementation. See:
 - [Benchmarks](docs/BENCHMARKS.md)
 - [Compatibility Matrix](docs/COMPATIBILITY_MATRIX.md)
 - [Roadmap](docs/ROADMAP.md)
-- [GitHub Workflow](CONTRIBUTING.md)
+- [Contributing](CONTRIBUTING.md)
+
+## License
+
+MIT — see [LICENSE](LICENSE).

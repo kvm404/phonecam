@@ -4,3 +4,8 @@ local.properties
 .idea/
 *.iml
 .kotlin/
+
+# Signing secrets
+keystore.properties
+*.jks
+*.keystore

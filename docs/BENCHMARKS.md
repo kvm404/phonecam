@@ -1,5 +1,10 @@
 # PhoneCam Benchmarks
 
+> **Status (v0.1):** The numbers below are release *targets* and this table is a
+> template. They have not been independently verified beyond the single
+> reference setup (Arch Linux + a vivo Android device). Treat unrecorded rows as
+> unmeasured, not as passing.
+
 This file records benchmark evidence for release decisions.
 
 ## Reference Baseline
@@ -27,7 +32,12 @@ timestamped test-pattern method. CPU should be captured during steady-state
 
 ## Results
 
-No benchmark runs have been recorded yet.
+No instrumented benchmark runs have been recorded yet.
+
+One qualitative observation on the reference setup (Arch Linux + vivo Android
+device, single setup, not instrumented): 720p30 streaming looked smooth in
+Google Meet and Discord. This is an informal single-setup observation, not a
+measured result.
 
 | Date | Build | Laptop | Android | Network | Latency | CPU | Dropped Frames | Duration | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
