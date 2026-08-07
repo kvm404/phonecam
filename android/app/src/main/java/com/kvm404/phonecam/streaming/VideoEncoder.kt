@@ -46,40 +46,52 @@ class VideoEncoder(
     /**
      * Configure and start the encoder plus its output-draining thread.
      *
-     * Devices disagree on which YUV input color format their H.264 encoder accepts — the
-     * flexible format that works on the reference vivo is rejected outright by some Unisoc
-     * encoders (e.g. the Samsung Galaxy A03's OMX.sprd.h264.encoder returns configure error
-     * -38). So the format is NEGOTIATED: each candidate in [COLOR_FORMAT_CANDIDATES], most
-     * compatible first, is tried with a fresh codec until one configures + starts. If none do,
-     * [onError] fires with a clear message and no codec is left half-initialized.
+     * Devices disagree on BOTH the YUV input color format AND the config options their H.264
+     * encoder accepts. The flexible format + CBR + baseline profile that works on the reference
+     * vivo is rejected outright by some Unisoc encoders: the Samsung Galaxy A03's
+     * OMX.sprd.h264.encoder supports NV12/I420 via DescribeColorFormat yet still fails
+     * configure() with error -38 (OMX_ErrorUndefined) for every color format — the blocker is a
+     * config OPTION (CBR bitrate mode and/or the baseline profile), not the color format. A
+     * setInteger never throws, so those options can only be rejected at configure() time.
+     *
+     * So the whole configuration is NEGOTIATED as a matrix: for each color format (most
+     * compatible first) try a "full" variant (with CBR + baseline, which fix a real stutter on
+     * capable devices) then a "minimal" variant (only the four mandatory keys). The first combo
+     * that configures + starts wins; its color format drives the [encode] packing branch. The
+     * vivo stays on Flexible+full (CBR retained); the A03 falls through to the first combo that
+     * configures. If all combinations fail, [onError] fires and no codec is left half-initialized.
      */
     fun start() {
         var lastError: Throwable? = null
         for (colorFormat in COLOR_FORMAT_CANDIDATES) {
-            val c = try {
-                MediaCodec.createEncoderByType(MIME)
-            } catch (t: Throwable) {
-                lastError = t
-                continue
-            }
-            try {
-                c.configure(
-                    buildFormat(colorFormat), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE,
-                )
-                c.start()
-                codec = c
-                inputColorFormat = colorFormat
-                running = true
-                outputThread =
-                    Thread({ drainOutput(c) }, "phonecam-encoder-output").also { it.start() }
-                return
-            } catch (t: Throwable) {
-                // This device rejected this color format: drop this codec and try the next.
-                lastError = t
+            for (variant in FormatVariant.entries) {
+                val c = try {
+                    MediaCodec.createEncoderByType(MIME)
+                } catch (t: Throwable) {
+                    lastError = t
+                    continue
+                }
                 try {
-                    c.release()
-                } catch (_: Throwable) {
-                    // ignore
+                    c.configure(
+                        buildFormat(colorFormat, variant), null, null,
+                        MediaCodec.CONFIGURE_FLAG_ENCODE,
+                    )
+                    c.start()
+                    codec = c
+                    inputColorFormat = colorFormat
+                    running = true
+                    outputThread =
+                        Thread({ drainOutput(c) }, "phonecam-encoder-output").also { it.start() }
+                    return
+                } catch (t: Throwable) {
+                    // This device rejected this color-format/options combo: drop the codec,
+                    // try the next combo.
+                    lastError = t
+                    try {
+                        c.release()
+                    } catch (_: Throwable) {
+                        // ignore
+                    }
                 }
             }
         }
@@ -87,23 +99,36 @@ class VideoEncoder(
         codec = null
         onError(
             IllegalStateException(
-                "no compatible H.264 color format on this device", lastError,
+                "no compatible H.264 encoder configuration on this device", lastError,
             ),
         )
     }
 
-    /** Build the encoder [MediaFormat] with the given input [colorFormat]. */
-    private fun buildFormat(colorFormat: Int): MediaFormat =
+    /** Which optional config keys a [buildFormat] variant carries beyond the four mandatory keys. */
+    private enum class FormatVariant {
+        /** The four mandatory keys plus CBR bitrate mode and the baseline profile. */
+        FULL,
+
+        /** ONLY the four mandatory keys: no bitrate mode, no profile, no level. */
+        MINIMAL,
+    }
+
+    /**
+     * Build the encoder [MediaFormat] for the given input [colorFormat] and [variant]. Every
+     * variant sets the four mandatory keys (color format, bit rate, frame rate, i-frame
+     * interval); [FormatVariant.FULL] additionally sets CBR bitrate mode + baseline profile.
+     */
+    private fun buildFormat(colorFormat: Int, variant: FormatVariant): MediaFormat =
         MediaFormat.createVideoFormat(MIME, profile.width, profile.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
             setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
             setInteger(MediaFormat.KEY_FRAME_RATE, profile.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SECONDS)
-            // CBR keeps keyframes from spiking to many hundreds of KB (VBR
-            // keyframe bursts were fragmenting into packet floods that dropped
-            // and froze whole GOPs). Best-effort: not every device honours it.
-            trySet { setInteger(MediaFormat.KEY_BITRATE_MODE, CBR_MODE) }
-            trySet {
+            if (variant == FormatVariant.FULL) {
+                // CBR keeps keyframes from spiking to many hundreds of KB (VBR keyframe bursts
+                // fragmented into packet floods that dropped and froze whole GOPs); baseline
+                // keeps decoding cheap. Vendor encoders that reject either fall to MINIMAL.
+                setInteger(MediaFormat.KEY_BITRATE_MODE, CBR_MODE)
                 setInteger(
                     MediaFormat.KEY_PROFILE,
                     MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline,
@@ -264,14 +289,6 @@ class VideoEncoder(
             // ignore
         }
         codec = null
-    }
-
-    private inline fun MediaFormat.trySet(block: MediaFormat.() -> Unit) {
-        try {
-            block()
-        } catch (_: Throwable) {
-            // best-effort format hint
-        }
     }
 
     companion object {
