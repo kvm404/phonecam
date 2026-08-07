@@ -13,9 +13,9 @@
 
     <!-- Quality selector -->
     <string name="quality_label">Quality</string>
-    <string name="quality_high">High (720p)</string>
-    <string name="quality_medium">Medium (540p)</string>
-    <string name="quality_low">Low (360p)</string>
+    <string name="quality_high">720p</string>
+    <string name="quality_medium">540p</string>
+    <string name="quality_low">360p</string>
 
     <!-- Scan screen -->
     <string name="scan_hint">Scan the QR from phonecam start</string>
