@@ -39,6 +39,7 @@ import com.kvm404.phonecam.pairing.PairingPayload
 import com.kvm404.phonecam.pairing.PairingState
 import com.kvm404.phonecam.pairing.PhoneIdentity
 import com.kvm404.phonecam.pairing.RtpIdentity
+import com.kvm404.phonecam.pairing.StreamQuality
 import com.kvm404.phonecam.pairing.VideoProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -95,12 +96,20 @@ class MainActivity : AppCompatActivity() {
 
     private var screenState = ScreenState.HOME
 
+    /**
+     * The quality preset chosen on Home and persisted in the "phonecam" prefs. Read/reflected
+     * on Home, written the instant the user changes the toggle, and captured verbatim at scan
+     * time as the canonical session resolution (overriding the QR payload's `video` dims).
+     */
+    private var selectedQuality: StreamQuality = StreamQuality.DEFAULT
+
     /** The payload of the active session; null on Home. Drives the pairing/connecting UI. */
     private var payload: PairingPayload? = null
 
     /**
-     * The fixed canvas profile: the payload's base landscape dims, announced verbatim at
-     * `/pair` and handed to the service's encoder. Never swapped or renegotiated.
+     * The fixed canvas profile: the chosen [selectedQuality]'s landscape dims (overriding the
+     * QR payload's `video`), announced verbatim at `/pair` and handed to the service's encoder.
+     * Never swapped or renegotiated.
      */
     private var committedProfile: VideoProfile? = null
 
@@ -150,11 +159,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val phoneIdentity: PhoneIdentity by lazy {
-        val prefs = getSharedPreferences("phonecam", MODE_PRIVATE)
-        val id = prefs.getString("phone_id", null)
-            ?: UUID.randomUUID().toString().also { prefs.edit().putString("phone_id", it).apply() }
+        val id = prefs().getString("phone_id", null)
+            ?: UUID.randomUUID().toString().also { prefs().edit().putString("phone_id", it).apply() }
         PhoneIdentity(id = id, name = Build.MODEL)
     }
+
+    private fun prefs() = getSharedPreferences("phonecam", MODE_PRIVATE)
 
     private val requestCameraPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -210,6 +220,36 @@ class MainActivity : AppCompatActivity() {
             streamingService?.flipCamera()
             attachPreviewIfLive()
         }
+        setupQualitySelector()
+    }
+
+    /**
+     * Load the persisted quality, reflect it in the toggle, and persist any user change
+     * immediately. The choice must be made on Home BEFORE scanning (a QR pairs the instant it
+     * is scanned), so this stays a Home-only control.
+     */
+    private fun setupQualitySelector() {
+        selectedQuality = StreamQuality.fromKey(prefs().getString("stream_quality", null))
+        binding.qualityToggleGroup.check(buttonIdFor(selectedQuality))
+        binding.qualityToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val quality = qualityFor(checkedId) ?: return@addOnButtonCheckedListener
+            selectedQuality = quality
+            prefs().edit().putString("stream_quality", quality.key).apply()
+        }
+    }
+
+    private fun buttonIdFor(quality: StreamQuality): Int = when (quality) {
+        StreamQuality.HIGH -> R.id.qualityHigh
+        StreamQuality.MEDIUM -> R.id.qualityMedium
+        StreamQuality.LOW -> R.id.qualityLow
+    }
+
+    private fun qualityFor(buttonId: Int): StreamQuality? = when (buttonId) {
+        R.id.qualityHigh -> StreamQuality.HIGH
+        R.id.qualityMedium -> StreamQuality.MEDIUM
+        R.id.qualityLow -> StreamQuality.LOW
+        else -> null
     }
 
     // ------------------------------------------------------------------ Screen switching
@@ -411,7 +451,11 @@ class MainActivity : AppCompatActivity() {
         // Guard rapid QR re-detections: don't launch a second handshake while one is running.
         if (pairingJob != null) return
 
-        val committed = current.video
+        // The chosen quality — NOT the QR payload's `video` dims — is the canonical session
+        // resolution: it sizes the encoder, the composition canvas, the streaming ImageAnalysis
+        // target (in the service), and the dims announced to the laptop at `/pair`. The Linux
+        // receiver adapts to whatever dims the phone reports, so no receiver change is needed.
+        val committed = selectedQuality.toProfile()
         committedProfile = committed
         updateLiveUi()
 
