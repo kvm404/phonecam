@@ -31,48 +31,110 @@ class VideoEncoder(
     private var codec: MediaCodec? = null
     private var outputThread: Thread? = null
 
+    /**
+     * The color format the encoder actually accepted at [start], picked from
+     * [COLOR_FORMAT_CANDIDATES]. Drives how [encode] fills the input buffer.
+     */
+    private var inputColorFormat = 0
+
     /** Frames queued since the last forced keyframe; see the sync request in [encode]. */
     private var framesSinceSyncRequest = 0
 
     @Volatile
     private var running = false
 
-    /** Configure and start the encoder plus its output-draining thread. */
+    /**
+     * Configure and start the encoder plus its output-draining thread.
+     *
+     * Devices disagree on BOTH the YUV input color format AND the config options their H.264
+     * encoder accepts. The flexible format + CBR + baseline profile that works on the reference
+     * vivo is rejected outright by some Unisoc encoders: the Samsung Galaxy A03's
+     * OMX.sprd.h264.encoder supports NV12/I420 via DescribeColorFormat yet still fails
+     * configure() with error -38 (OMX_ErrorUndefined) for every color format — the blocker is a
+     * config OPTION (CBR bitrate mode and/or the baseline profile), not the color format. A
+     * setInteger never throws, so those options can only be rejected at configure() time.
+     *
+     * So the whole configuration is NEGOTIATED as a matrix: for each color format (most
+     * compatible first) try a "full" variant (with CBR + baseline, which fix a real stutter on
+     * capable devices) then a "minimal" variant (only the four mandatory keys). The first combo
+     * that configures + starts wins; its color format drives the [encode] packing branch. The
+     * vivo stays on Flexible+full (CBR retained); the A03 falls through to the first combo that
+     * configures. If all combinations fail, [onError] fires and no codec is left half-initialized.
+     */
     fun start() {
-        try {
-            val format = MediaFormat.createVideoFormat(MIME, profile.width, profile.height).apply {
-                setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
-                )
-                setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-                setInteger(MediaFormat.KEY_FRAME_RATE, profile.fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SECONDS)
-                // CBR keeps keyframes from spiking to many hundreds of KB (VBR
-                // keyframe bursts were fragmenting into packet floods that dropped
-                // and froze whole GOPs). Best-effort: not every device honours it.
-                trySet { setInteger(MediaFormat.KEY_BITRATE_MODE, CBR_MODE) }
-                trySet {
-                    setInteger(
-                        MediaFormat.KEY_PROFILE,
-                        MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline,
+        var lastError: Throwable? = null
+        for (colorFormat in COLOR_FORMAT_CANDIDATES) {
+            for (variant in FormatVariant.entries) {
+                val c = try {
+                    MediaCodec.createEncoderByType(MIME)
+                } catch (t: Throwable) {
+                    lastError = t
+                    continue
+                }
+                try {
+                    c.configure(
+                        buildFormat(colorFormat, variant), null, null,
+                        MediaCodec.CONFIGURE_FLAG_ENCODE,
                     )
+                    c.start()
+                    codec = c
+                    inputColorFormat = colorFormat
+                    running = true
+                    outputThread =
+                        Thread({ drainOutput(c) }, "phonecam-encoder-output").also { it.start() }
+                    return
+                } catch (t: Throwable) {
+                    // This device rejected this color-format/options combo: drop the codec,
+                    // try the next combo.
+                    lastError = t
+                    try {
+                        c.release()
+                    } catch (_: Throwable) {
+                        // ignore
+                    }
                 }
             }
-
-            val c = MediaCodec.createEncoderByType(MIME)
-            c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            c.start()
-            codec = c
-            running = true
-
-            outputThread = Thread({ drainOutput(c) }, "phonecam-encoder-output").also { it.start() }
-        } catch (t: Throwable) {
-            running = false
-            releaseCodecQuietly()
-            onError(t)
         }
+        running = false
+        codec = null
+        onError(
+            IllegalStateException(
+                "no compatible H.264 encoder configuration on this device", lastError,
+            ),
+        )
     }
+
+    /** Which optional config keys a [buildFormat] variant carries beyond the four mandatory keys. */
+    private enum class FormatVariant {
+        /** The four mandatory keys plus CBR bitrate mode and the baseline profile. */
+        FULL,
+
+        /** ONLY the four mandatory keys: no bitrate mode, no profile, no level. */
+        MINIMAL,
+    }
+
+    /**
+     * Build the encoder [MediaFormat] for the given input [colorFormat] and [variant]. Every
+     * variant sets the four mandatory keys (color format, bit rate, frame rate, i-frame
+     * interval); [FormatVariant.FULL] additionally sets CBR bitrate mode + baseline profile.
+     */
+    private fun buildFormat(colorFormat: Int, variant: FormatVariant): MediaFormat =
+        MediaFormat.createVideoFormat(MIME, profile.width, profile.height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+            setInteger(MediaFormat.KEY_FRAME_RATE, profile.fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SECONDS)
+            if (variant == FormatVariant.FULL) {
+                // CBR keeps keyframes from spiking to many hundreds of KB (VBR keyframe bursts
+                // fragmented into packet floods that dropped and froze whole GOPs); baseline
+                // keeps decoding cheap. Vendor encoders that reject either fall to MINIMAL.
+                setInteger(MediaFormat.KEY_BITRATE_MODE, CBR_MODE)
+                setInteger(
+                    MediaFormat.KEY_PROFILE,
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline,
+                )
+            }
+        }
 
     /**
      * Copy [frame] into a free input buffer and queue it. If the codec has no input buffer
@@ -85,12 +147,34 @@ class VideoEncoder(
             val index = c.dequeueInputBuffer(0)
             if (index < 0) return // queue full -> drop this frame
 
-            val image = c.getInputImage(index)
-            if (image == null) {
-                c.queueInputBuffer(index, 0, 0, frame.timestampUs, 0)
-                return
+            if (inputColorFormat ==
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+            ) {
+                // Flexible: stride-aware plane copy into the codec's input Image (the vivo path).
+                val image = c.getInputImage(index)
+                if (image == null) {
+                    c.queueInputBuffer(index, 0, 0, frame.timestampUs, 0)
+                    return
+                }
+                fillImage(image, frame)
+            } else {
+                // Semi-planar (NV12) / planar (I420): write a tightly-packed frame into the raw
+                // input ByteBuffer at the configured width/height.
+                val buffer = c.getInputBuffer(index)
+                if (buffer == null) {
+                    c.queueInputBuffer(index, 0, 0, frame.timestampUs, 0)
+                    return
+                }
+                val packed = if (inputColorFormat ==
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+                ) {
+                    YuvPacking.packNv12(frame.y, frame.u, frame.v, frame.width, frame.height)
+                } else {
+                    YuvPacking.packI420(frame.y, frame.u, frame.v, frame.width, frame.height)
+                }
+                buffer.clear()
+                buffer.put(packed)
             }
-            fillImage(image, frame)
             val size = frame.width * frame.height * 3 / 2
             c.queueInputBuffer(index, 0, size, frame.timestampUs, 0)
 
@@ -207,15 +291,18 @@ class VideoEncoder(
         codec = null
     }
 
-    private inline fun MediaFormat.trySet(block: MediaFormat.() -> Unit) {
-        try {
-            block()
-        } catch (_: Throwable) {
-            // best-effort format hint
-        }
-    }
-
     companion object {
+        /**
+         * Encoder input color formats to try at [start], most compatible first. Flexible is the
+         * historically-working format; the semi-planar/planar fallbacks cover vendor encoders
+         * (e.g. Unisoc) that reject it.
+         */
+        private val COLOR_FORMAT_CANDIDATES = intArrayOf(
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar,
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar,
+        )
+
         private const val MIME = "video/avc"
         private const val DEFAULT_BIT_RATE = 4_000_000
         private const val I_FRAME_INTERVAL_SECONDS = 1

@@ -115,6 +115,14 @@ class StreamingService : LifecycleService() {
 
     private var callback: Callback? = null
 
+    /**
+     * A terminal stop that happened before any callback was attached (e.g. the encoder failed to
+     * start before the activity finished binding). Latched here and replayed in [setCallback] so
+     * the UI is never left stuck on "Connecting".
+     */
+    private var pendingStop = false
+    private var pendingStopError: String? = null
+
     @Volatile
     private var streaming = false
 
@@ -154,6 +162,14 @@ class StreamingService : LifecycleService() {
 
     fun setCallback(cb: Callback?) {
         callback = cb
+        // Replay a stop/error that fired before this callback attached (start-failure race),
+        // so a late-binding activity still leaves "Connecting" and shows the error.
+        if (cb != null && pendingStop) {
+            pendingStop = false
+            val error = pendingStopError
+            pendingStopError = null
+            cb.onStreamingStopped(error)
+        }
     }
 
     fun isStreaming(): Boolean = streaming
@@ -233,7 +249,17 @@ class StreamingService : LifecycleService() {
         val wasStreaming = streaming
         releasePipeline()
         stopForeground(STOP_FOREGROUND_REMOVE)
-        if (wasStreaming || error != null) callback?.onStreamingStopped(error)
+        if (wasStreaming || error != null) {
+            val cb = callback
+            if (cb != null) {
+                cb.onStreamingStopped(error)
+            } else {
+                // No activity bound yet (e.g. encoder failed to start before binding finished):
+                // latch this terminal stop so [setCallback] replays it once the activity attaches.
+                pendingStop = true
+                pendingStopError = error
+            }
+        }
         stopSelf()
     }
 
