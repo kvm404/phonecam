@@ -11,6 +11,12 @@
     <string name="btn_scan_connect">Scan QR to connect</string>
     <string name="btn_exit">Exit</string>
 
+    <!-- Quality selector -->
+    <string name="quality_label">Quality</string>
+    <string name="quality_high">720p</string>
+    <string name="quality_medium">540p</string>
+    <string name="quality_low">360p</string>
+
     <!-- Scan screen -->
     <string name="scan_hint">Scan the QR from phonecam start</string>
     <string name="btn_cancel">Cancel</string>

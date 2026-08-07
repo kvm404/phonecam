@@ -314,10 +314,15 @@ class StreamingService : LifecycleService() {
     }
 
     private fun buildAnalysis(): ImageAnalysis {
+        // Target the SESSION canvas dims (the chosen [StreamQuality], threaded in as the
+        // committed profile). This is the key CPU win on weak devices: a smaller analysis
+        // resolution means the per-frame crop -> rotate -> compose -> pack chain runs on
+        // fewer pixels. Falls back to 720p only if the canvas is somehow unset.
+        val target = canvas?.let { Size(it.width, it.height) } ?: Size(1280, 720)
         val resolutionSelector = ResolutionSelector.Builder()
             .setResolutionStrategy(
                 ResolutionStrategy(
-                    Size(1280, 720),
+                    target,
                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
                 )
             )
