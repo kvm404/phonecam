@@ -6,15 +6,18 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Size
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -208,11 +211,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        applyEdgeToEdge()
-
-        wireUp()
+        inflateChrome()
 
         if (StreamingService.isRunning) {
             // Reopened / recreated while a stream is live: rebind and show Live.
@@ -232,6 +231,34 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+    }
+
+    /**
+     * The activity keeps [configChanges] so a live stream is not torn down on rotate.
+     * Re-inflate so [layout-land] is used; pairing and the bound service stay put.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val previous = screenState
+        val status = binding.homeStatusText.text?.toString()
+            ?: getString(R.string.home_status_not_connected)
+        inflateChrome()
+        when (previous) {
+            ScreenState.HOME -> showHome(status)
+            ScreenState.SCAN -> showScan()
+            ScreenState.LIVE -> {
+                showLive()
+                attachPreviewIfLive()
+            }
+        }
+    }
+
+    private fun inflateChrome() {
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        applyEdgeToEdge()
+        wireUp()
+        binding.root.requestApplyInsets()
     }
 
     private fun applyEdgeToEdge() {
@@ -701,27 +728,51 @@ class MainActivity : AppCompatActivity() {
         previewAspectWidth = streamWidth
         previewAspectHeight = streamHeight
         applyPreviewAspect()
-        if (binding.previewCard.width <= 0) {
-            binding.previewCard.post { applyPreviewAspect() }
+        if (binding.liveStage.width <= 0) {
+            binding.liveStage.post { applyPreviewAspect() }
         }
     }
 
     /**
-     * Height follows the card's measured width (insets + page padding already applied),
-     * not raw [android.util.DisplayMetrics.widthPixels], so 16:9 holds in landscape,
-     * cutouts, and multi-window.
+     * Fit the 16:9 canvas into [liveStage]. Portrait uses the stage width; landscape
+     * also caps height so a full-width preview cannot overflow the short side.
      */
     private fun applyPreviewAspect() {
-        val width = binding.previewCard.width
-        if (width <= 0 || previewAspectWidth <= 0) return
-        val height = (width.toLong() * previewAspectHeight / previewAspectWidth)
+        val stage = binding.liveStage
+        val availW = stage.width
+        if (availW <= 0 || previewAspectWidth <= 0) return
+        val landscape =
+            resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val maxH = if (landscape && stage.height > 0) stage.height else Int.MAX_VALUE
+        var width = availW
+        var height = (width.toLong() * previewAspectHeight / previewAspectWidth)
             .toInt()
             .coerceAtLeast(1)
-        val params = binding.livePreview.layoutParams
-        if (params.width == ViewGroup.LayoutParams.MATCH_PARENT && params.height == height) return
-        params.width = ViewGroup.LayoutParams.MATCH_PARENT
-        params.height = height
-        binding.livePreview.layoutParams = params
+        if (height > maxH) {
+            height = maxH
+            width = (height.toLong() * previewAspectWidth / previewAspectHeight)
+                .toInt()
+                .coerceAtLeast(1)
+        }
+        val previewParams = binding.livePreview.layoutParams
+        val previewWidth = if (landscape) width else ViewGroup.LayoutParams.MATCH_PARENT
+        if (previewParams.width == previewWidth && previewParams.height == height) return
+        previewParams.width = previewWidth
+        previewParams.height = height
+        binding.livePreview.layoutParams = previewParams
+
+        val cardParams = binding.previewCard.layoutParams
+        if (landscape) {
+            cardParams.width = ViewGroup.LayoutParams.WRAP_CONTENT
+            cardParams.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            if (cardParams is FrameLayout.LayoutParams) {
+                cardParams.gravity = Gravity.CENTER
+            }
+        } else {
+            cardParams.width = ViewGroup.LayoutParams.MATCH_PARENT
+            cardParams.height = ViewGroup.LayoutParams.WRAP_CONTENT
+        }
+        binding.previewCard.layoutParams = cardParams
     }
 
     /** Any pairing failure (pre-streaming): surface the reason on Home's status card. */

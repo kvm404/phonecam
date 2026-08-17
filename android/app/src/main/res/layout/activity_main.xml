@@ -170,8 +170,8 @@
             android:layout_height="match_parent" />
 
         <ImageView
-            android:layout_width="240dp"
-            android:layout_height="240dp"
+            android:layout_width="@dimen/scan_reticle_size"
+            android:layout_height="@dimen/scan_reticle_size"
             android:layout_gravity="center"
             android:contentDescription="@null"
             android:src="@drawable/ic_scan_reticle" />
@@ -278,6 +278,7 @@
         </LinearLayout>
 
         <FrameLayout
+            android:id="@+id/liveStage"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp">
