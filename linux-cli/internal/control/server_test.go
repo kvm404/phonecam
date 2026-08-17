@@ -392,6 +392,83 @@ func TestStatusIncludesReceiverRestarts(t *testing.T) {
 	}
 }
 
+func TestStatusRequestKeyframeWhenLastPacketStale(t *testing.T) {
+	session, now := newTestSession(t)
+	last := now.Add(time.Second - 500*time.Millisecond)
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now.Add(time.Second)},
+		Media:   stubMedia{stats: rtp.Stats{LastPacket: last}},
+	}).Handler()
+
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	var status statusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
+		t.Fatalf("invalid status json: %v", err)
+	}
+	if status.LastRTPms == nil || *status.LastRTPms != 500 {
+		t.Fatalf("expected last_rtp_ms=500, got %#v", status.LastRTPms)
+	}
+	if !status.RequestKeyframe {
+		t.Fatalf("expected request_keyframe true when last packet is older than 400ms, got %#v", status)
+	}
+}
+
+func TestStatusRequestKeyframeClearedWhenPacketRecent(t *testing.T) {
+	session, now := newTestSession(t)
+	last := now.Add(time.Second - 100*time.Millisecond)
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now.Add(time.Second)},
+		Media:   stubMedia{stats: rtp.Stats{LastPacket: last}},
+	}).Handler()
+
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	var status statusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
+		t.Fatalf("invalid status json: %v", err)
+	}
+	if status.RequestKeyframe {
+		t.Fatal("expected request_keyframe false when last_rtp_ms <= 400")
+	}
+	if _, ok := mustJSONMap(t, recorder.Body.Bytes())["request_keyframe"]; ok {
+		t.Fatal("request_keyframe should be omitted when a packet was just forwarded")
+	}
+}
+
+func TestStatusRequestKeyframeFalseWhenNoPacket(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now.Add(time.Second)},
+		Media:   stubMedia{stats: rtp.Stats{}},
+	}).Handler()
+
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	var status statusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
+		t.Fatalf("invalid status json: %v", err)
+	}
+	if status.RequestKeyframe {
+		t.Fatal("expected request_keyframe false when LastPacket is zero")
+	}
+}
+
 func mustJSONMap(t *testing.T, data []byte) map[string]any {
 	t.Helper()
 	var body map[string]any

@@ -25,7 +25,7 @@ class VideoEncoder(
     private val profile: VideoProfile,
     private val packetizer: RtpPacketizer,
     private val sender: RtpSender,
-    private val bitRate: Int = DEFAULT_BIT_RATE,
+    bitRate: Int = BitrateController.targetFor(profile.width, profile.height, profile.fps),
     private val onError: (Throwable) -> Unit,
 ) {
     private var codec: MediaCodec? = null
@@ -37,8 +37,11 @@ class VideoEncoder(
      */
     private var inputColorFormat = 0
 
-    /** Frames queued since the last forced keyframe; see the sync request in [encode]. */
+    /** Frames seen since the last forced keyframe; interval comes from [bitrateController]. */
     private var framesSinceSyncRequest = 0
+
+    private val lock = Any()
+    private val bitrateController = BitrateController(capBps = bitRate)
 
     @Volatile
     private var running = false
@@ -106,6 +109,9 @@ class VideoEncoder(
 
     /** Which optional config keys a [buildFormat] variant carries beyond the four mandatory keys. */
     private enum class FormatVariant {
+        /** FULL plus intra-refresh; rejected extra keys fall through to [FULL]. */
+        FULL_INTRA,
+
         /** The four mandatory keys plus CBR bitrate mode and the baseline profile. */
         FULL,
 
@@ -121,10 +127,10 @@ class VideoEncoder(
     private fun buildFormat(colorFormat: Int, variant: FormatVariant): MediaFormat =
         MediaFormat.createVideoFormat(MIME, profile.width, profile.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrateController.bitrate())
             setInteger(MediaFormat.KEY_FRAME_RATE, profile.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SECONDS)
-            if (variant == FormatVariant.FULL) {
+            if (variant == FormatVariant.FULL || variant == FormatVariant.FULL_INTRA) {
                 // CBR keeps keyframes from spiking to many hundreds of KB (VBR keyframe bursts
                 // fragmented into packet floods that dropped and froze whole GOPs); baseline
                 // keeps decoding cheap. Vendor encoders that reject either fall to MINIMAL.
@@ -133,6 +139,9 @@ class VideoEncoder(
                     MediaFormat.KEY_PROFILE,
                     MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline,
                 )
+            }
+            if (variant == FormatVariant.FULL_INTRA) {
+                setInteger(MediaFormat.KEY_INTRA_REFRESH_PERIOD, profile.fps)
             }
         }
 
@@ -144,8 +153,22 @@ class VideoEncoder(
         val c = codec
         if (!running || c == null) return
         try {
+            val skip = synchronized(lock) {
+                framesSinceSyncRequest++
+                bitrateController.shouldSkipEncode()
+            }
+            if (skip) {
+                applyPendingParameters(c)
+                return
+            }
+
             val index = c.dequeueInputBuffer(0)
-            if (index < 0) return // queue full -> drop this frame
+            if (index < 0) {
+                // queue full -> drop this frame; the controller may step bitrate down
+                synchronized(lock) { bitrateController.onInputDrop() }
+                applyPendingParameters(c)
+                return
+            }
 
             if (inputColorFormat ==
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
@@ -154,6 +177,7 @@ class VideoEncoder(
                 val image = c.getInputImage(index)
                 if (image == null) {
                     c.queueInputBuffer(index, 0, 0, frame.timestampUs, 0)
+                    applyPendingParameters(c)
                     return
                 }
                 fillImage(image, frame)
@@ -163,6 +187,7 @@ class VideoEncoder(
                 val buffer = c.getInputBuffer(index)
                 if (buffer == null) {
                     c.queueInputBuffer(index, 0, 0, frame.timestampUs, 0)
+                    applyPendingParameters(c)
                     return
                 }
                 val packed = if (inputColorFormat ==
@@ -177,24 +202,68 @@ class VideoEncoder(
             }
             val size = frame.width * frame.height * 3 / 2
             c.queueInputBuffer(index, 0, size, frame.timestampUs, 0)
-
-            // Vendor encoders don't reliably honour KEY_I_FRAME_INTERVAL, and after
-            // RTP packet loss the receiver stays frozen until the next keyframe.
-            // Force one every ~2 seconds so recovery is always fast.
-            framesSinceSyncRequest++
-            if (framesSinceSyncRequest >= profile.fps * SYNC_REQUEST_INTERVAL_SECONDS) {
-                framesSinceSyncRequest = 0
-                val params = Bundle()
-                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                try {
-                    c.setParameters(params)
-                } catch (_: IllegalStateException) {
-                    // Codec busy/released mid-flight: skip; next interval retries.
-                }
-            }
+            applyPendingParameters(c)
         } catch (t: Throwable) {
             running = false
             onError(t)
+        }
+    }
+
+    /**
+     * Force an IDR now. Used after reconnect and when `/status.request_keyframe` is set.
+     * The periodic counter is private; this is the hook for a one-shot request.
+     */
+    fun requestSyncFrame() {
+        val c = codec
+        if (!running || c == null) return
+        synchronized(lock) { framesSinceSyncRequest = 0 }
+        applyParameters(c, bitrateBps = null, sync = true)
+    }
+
+    /** Receiver RTP age from GET /status `last_rtp_ms`. */
+    fun noteReceiverAge(lastRtpMs: Long) {
+        synchronized(lock) { bitrateController.noteReceiverAge(lastRtpMs) }
+        val c = codec
+        if (running && c != null) applyPendingParameters(c)
+    }
+
+    /** `/status.request_keyframe`: 1 s cadence plus an immediate sync request. */
+    fun noteRequestKeyframe() {
+        synchronized(lock) { bitrateController.noteRequestKeyframe() }
+        val c = codec
+        if (running && c != null) applyPendingParameters(c)
+    }
+
+    private fun applyPendingParameters(c: MediaCodec) {
+        val bitrate: Int?
+        val sync: Boolean
+        synchronized(lock) {
+            bitrate = if (bitrateController.consumeApplyBitrate()) {
+                bitrateController.bitrate()
+            } else {
+                null
+            }
+            val interval = bitrateController.syncIntervalSeconds()
+            val periodic = framesSinceSyncRequest >= profile.fps * interval
+            if (periodic) framesSinceSyncRequest = 0
+            sync = bitrateController.consumeForceSync() || periodic
+        }
+        applyParameters(c, bitrate, sync)
+    }
+
+    private fun applyParameters(c: MediaCodec, bitrateBps: Int?, sync: Boolean) {
+        if (bitrateBps == null && !sync) return
+        val params = Bundle()
+        if (bitrateBps != null) {
+            params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrateBps)
+        }
+        if (sync) {
+            params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+        }
+        try {
+            c.setParameters(params)
+        } catch (_: IllegalStateException) {
+            // Codec busy/released mid-flight: skip; next interval retries.
         }
     }
 
@@ -304,9 +373,7 @@ class VideoEncoder(
         )
 
         private const val MIME = "video/avc"
-        private const val DEFAULT_BIT_RATE = 4_000_000
         private const val I_FRAME_INTERVAL_SECONDS = 1
-        private const val SYNC_REQUEST_INTERVAL_SECONDS = 2
         private const val CBR_MODE = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
         private const val DEQUEUE_TIMEOUT_US = 10_000L
         private const val STOP_JOIN_MS = 500L

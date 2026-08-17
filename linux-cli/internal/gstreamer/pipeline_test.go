@@ -22,6 +22,7 @@ func TestPipelineArgsBuildsV0Pipeline(t *testing.T) {
 		"drop-on-latency=true",
 		"rtph264depay",
 		"h264parse",
+		"config-interval=-1",
 		"avdec_h264",
 		"videoconvert",
 		"video/x-raw,format=YUY2,width=1280,height=720",
@@ -56,6 +57,7 @@ func TestPipelineArgsUsesOverrides(t *testing.T) {
 		"port=5000",
 		"payload=97",
 		"latency=5",
+		"config-interval=-1",
 		"video/x-raw,format=YUY2,width=640,height=360",
 		"device=/dev/video42",
 	} {

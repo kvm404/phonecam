@@ -119,6 +119,8 @@ func PipelineArgs(config Config) ([]string, error) {
 		"rtph264depay",
 		"!",
 		"h264parse",
+		// Repeat SPS/PPS so a mid-GOP joiner can start without the next IDR.
+		"config-interval=-1",
 		"!",
 		"avdec_h264",
 		"!",
