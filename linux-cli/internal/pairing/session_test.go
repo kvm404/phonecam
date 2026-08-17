@@ -175,6 +175,9 @@ func TestRTPBindingRequiresApprovalAndValidatesSource(t *testing.T) {
 	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	session := newTestSession(t, Config{Now: now})
 	source := RTPSource{IP: net.ParseIP("192.168.1.50"), Port: 50000, SSRC: 1234}
+	if _, ok := session.ApprovedSource(); ok {
+		t.Fatal("expected no approved source before approval")
+	}
 
 	if err := session.BindRTPSource(source); !errors.Is(err, ErrNotApproved) {
 		t.Fatalf("expected approval requirement, got %v", err)
@@ -186,6 +189,14 @@ func TestRTPBindingRequiresApprovalAndValidatesSource(t *testing.T) {
 	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
 		t.Fatalf("expected approval to succeed: %v", err)
 	}
+	got, ok := session.ApprovedSource()
+	if !ok {
+		t.Fatal("expected approved source after approval")
+	}
+	if !got.IP.Equal(source.IP) || got.Port != source.Port || got.SSRC != source.SSRC {
+		t.Fatalf("approved source %#v, want %#v", got, source)
+	}
+
 	if err := session.BindRTPSource(source); err != nil {
 		t.Fatalf("expected RTP binding to succeed: %v", err)
 	}
@@ -195,8 +206,12 @@ func TestRTPBindingRequiresApprovalAndValidatesSource(t *testing.T) {
 	if err := session.ValidateRTPSource(RTPSource{IP: net.ParseIP("192.168.1.51"), Port: 50000, SSRC: 1234}); !errors.Is(err, ErrSourceMismatch) {
 		t.Fatalf("expected source mismatch, got %v", err)
 	}
-	if err := session.BindRTPSource(source); !errors.Is(err, ErrAlreadyBound) {
-		t.Fatalf("expected second bind to fail, got %v", err)
+	if err := session.BindRTPSource(source); err != nil {
+		t.Fatalf("expected same-source re-bind to succeed, got %v", err)
+	}
+	other := RTPSource{IP: net.ParseIP("192.168.1.50"), Port: 50001, SSRC: 1234}
+	if err := session.BindRTPSource(other); !errors.Is(err, ErrAlreadyBound) {
+		t.Fatalf("expected different already-bound source to fail, got %v", err)
 	}
 }
 

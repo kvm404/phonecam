@@ -281,6 +281,17 @@ func (s *Session) ApprovedPhone() Phone {
 	return s.approvedPhone
 }
 
+// ApprovedSource returns the phone-announced RTP pin after approval.
+func (s *Session) ApprovedSource() (RTPSource, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.invalidated || !s.approved || s.pendingSource.IP == nil {
+		return RTPSource{}, false
+	}
+	return copyRTPSource(s.pendingSource), true
+}
+
 // NegotiatedVideo returns the phone-reported video profile if one was stored
 // during token consumption, otherwise the session's advertised profile.
 func (s *Session) NegotiatedVideo() VideoProfile {
@@ -320,6 +331,9 @@ func (s *Session) BindRTPSource(source RTPSource) error {
 		return ErrInvalidEndpoint
 	}
 	if s.rtpSource != nil {
+		if sameRTPSource(*s.rtpSource, source) {
+			return nil
+		}
 		return ErrAlreadyBound
 	}
 	if !sameRTPSource(s.pendingSource, source) {

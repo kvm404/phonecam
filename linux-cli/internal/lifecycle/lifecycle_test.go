@@ -184,6 +184,59 @@ func TestStatusRunningApproved(t *testing.T) {
 	}
 }
 
+func TestStatusPrintsRTPCounters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"approved":true,"session":"s1","last_rtp_ms":14,"packets_forwarded":390,"packets_dropped_acl":412}`))
+	}))
+	t.Cleanup(srv.Close)
+	parsed, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+	record := session.Record{PID: 1234, ControlPort: port, SessionID: "s1"}
+	m := newTestManager(&fakeStore{record: record}, &fakeProcess{}, http.DefaultClient)
+
+	var stdout, stderr bytes.Buffer
+	if code := m.Status(&stdout, &stderr); code != 0 {
+		t.Fatalf("expected exit 0, got %d (stderr %q)", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "RTP:            live, last packet 14ms ago, 390 fwd, 412 acl drops") {
+		t.Fatalf("expected RTP counters, got:\n%s", out)
+	}
+}
+
+func TestStatusPrintsSilentRTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"approved":true,"session":"s1","packets_dropped_acl":412,"packets_forwarded":0}`))
+	}))
+	t.Cleanup(srv.Close)
+	parsed, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+	record := session.Record{PID: 1234, ControlPort: port, SessionID: "s1"}
+	m := newTestManager(&fakeStore{record: record}, &fakeProcess{}, http.DefaultClient)
+
+	var stdout, stderr bytes.Buffer
+	if code := m.Status(&stdout, &stderr); code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "RTP:            silent, 0 fwd, 412 acl drops") {
+		t.Fatalf("expected silent RTP line, got:\n%s", stdout.String())
+	}
+}
+
 func TestStatusRunningWaiting(t *testing.T) {
 	_, port := statusServer(t, "s1", false)
 	record := session.Record{PID: 1234, ControlPort: port, SessionID: "s1", StartedAt: time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)}

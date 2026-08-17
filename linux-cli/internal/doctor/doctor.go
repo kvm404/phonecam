@@ -3,7 +3,11 @@ package doctor
 import (
 	"fmt"
 	"io"
+	"net"
 	"strings"
+	"syscall"
+
+	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
 )
 
 const (
@@ -95,6 +99,7 @@ func Run(sys System) Report {
 	checks = append(checks, desktopSessionCheck(sys))
 	checks = append(checks, distroCheck(sys))
 	checks = append(checks, firewallCheck(sys))
+	checks = append(checks, udpRcvbufCheck())
 	checks = append(checks, appVisibilityGuidanceCheck())
 	checks = append(checks, Check{
 		Name:    "LAN privacy",
@@ -300,6 +305,63 @@ func firewallCheck(sys System) Check {
 		Message: "no active ufw or firewalld detected; PhoneCam needs local TCP control and UDP RTP ports reachable from the Android phone",
 		Fix:     "If pairing or streaming fails, allow PhoneCam on your trusted LAN firewall profile.",
 	}
+}
+
+func udpRcvbufCheck() Check {
+	got, err := probeUDPRcvbuf(rtp.PublicRcvbuf)
+	if err != nil {
+		return Check{
+			Name:    "UDP receive buffer",
+			Status:  StatusWarn,
+			Message: "could not probe SO_RCVBUF: " + err.Error(),
+			Fix:     "PhoneCam needs a 4MB UDP receive buffer to absorb H.264 keyframe bursts.",
+		}
+	}
+	if rcvbufEffective(got) < rtp.PublicRcvbuf {
+		return Check{
+			Name:    "UDP receive buffer",
+			Status:  StatusWarn,
+			Message: fmt.Sprintf("kernel SO_RCVBUF effective size is %d, want %d", rcvbufEffective(got), rtp.PublicRcvbuf),
+			Fix:     "Raise net.core.rmem_max to at least 4194304 so keyframe bursts are not dropped.",
+		}
+	}
+	return Check{
+		Name:    "UDP receive buffer",
+		Status:  StatusPass,
+		Message: "SO_RCVBUF can reach 4MB",
+	}
+}
+
+func rcvbufEffective(got int) int {
+	return min(got, got/2)
+}
+
+func probeUDPRcvbuf(want int) (int, error) {
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	udp, ok := conn.(*net.UDPConn)
+	if !ok {
+		return 0, fmt.Errorf("unexpected packet conn %T", conn)
+	}
+	raw, err := udp.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var got int
+	var sockErr error
+	if err := raw.Control(func(fd uintptr) {
+		sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, want)
+		if sockErr != nil {
+			return
+		}
+		got, sockErr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF)
+	}); err != nil {
+		return 0, err
+	}
+	return got, sockErr
 }
 
 func appVisibilityGuidanceCheck() Check {
