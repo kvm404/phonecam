@@ -466,10 +466,10 @@ class StreamingService : LifecycleService() {
                 .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
             PendingIntent.FLAG_IMMUTABLE,
         )
-        val stopIntent = PendingIntent.getService(
+        val stopPending = PendingIntent.getService(
             this,
             1,
-            Intent(this, StreamingService::class.java).setAction(ACTION_STOP),
+            stopIntent(this),
             PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -480,7 +480,7 @@ class StreamingService : LifecycleService() {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .addAction(0, getString(R.string.notification_stop), stopIntent)
+            .addAction(0, getString(R.string.notification_stop), stopPending)
             .build()
     }
 
@@ -493,6 +493,10 @@ class StreamingService : LifecycleService() {
         private const val CHANNEL_ID = "phonecam_streaming"
         private const val NOTIFICATION_ID = 1
         private const val ACTION_STOP = "com.kvm404.phonecam.action.STOP"
+
+        /** Same intent as the notification Stop action; works before the activity has a binder. */
+        fun stopIntent(context: Context): Intent =
+            Intent(context, StreamingService::class.java).setAction(ACTION_STOP)
 
         /** Safety valve so a wedged stream can never hold the CPU forever. */
         private const val WAKE_LOCK_TIMEOUT_MS = 12L * 60L * 60L * 1000L

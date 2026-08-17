@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Size
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -129,10 +130,28 @@ class MainActivity : AppCompatActivity() {
     private var streamingService: StreamingService? = null
     private var bound = false
 
+    /**
+     * Set when the user hits Leave/Cancel (or Back on Live). [onPaired] starts the
+     * foreground service and binds asynchronously; if Cancel wins that race,
+     * [streamingService] is still null and [leaveSession] must stop via
+     * [StreamingService.stopIntent] plus this latch so [onServiceConnected] cannot
+     * attach a callback and keep the session alive.
+     */
+    @Volatile
+    private var leaveRequested = false
+
+    private var previewAspectWidth = 16
+    private var previewAspectHeight = 9
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val svc = (service as StreamingService.LocalBinder).service
             streamingService = svc
+            if (leaveRequested) {
+                svc.setCallback(null)
+                svc.stopFromActivity()
+                return
+            }
             svc.setCallback(streamingCallback)
             // Adopt the session details (name/profile) the service holds, so a rebind after an
             // activity recreate can render the Live screen without the original payload.
@@ -179,7 +198,7 @@ class MainActivity : AppCompatActivity() {
                 maybeRequestNotificationPermission()
                 showScan()
             } else {
-                binding.homeStatusText.text = getString(R.string.home_status_permission_needed)
+                showHome(getString(R.string.home_status_permission_needed))
             }
         }
 
@@ -241,6 +260,7 @@ class MainActivity : AppCompatActivity() {
                 cancelParams.bottomMargin = bars.bottom + scanCancelBottomPad()
                 binding.scanCancelButton.layoutParams = cancelParams
             }
+            applyPreviewAspect()
             insets
         }
     }
@@ -261,6 +281,9 @@ class MainActivity : AppCompatActivity() {
         binding.flipCameraButton.setOnClickListener {
             streamingService?.flipCamera()
             attachPreviewIfLive()
+        }
+        binding.previewCard.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left != oldRight - oldLeft) applyPreviewAspect()
         }
         setupQualitySelector()
     }
@@ -339,6 +362,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showScan() {
         screenState = ScreenState.SCAN
+        leaveRequested = false
         handledPayload = false
         binding.homeContainer.visibility = View.GONE
         binding.liveContainer.visibility = View.GONE
@@ -375,13 +399,29 @@ class MainActivity : AppCompatActivity() {
         showHome(status)
     }
 
-    /** User-initiated stop of a live session (Leave button / back on Live), then Home. */
+    /** User-initiated stop of a live session (Leave / Cancel / back on Live), then Home. */
     private fun leaveSession(status: String) {
-        streamingService?.let {
-            it.setCallback(null)
-            it.stopFromActivity()
-        }
+        stopStreamingFromUi()
         teardownToHome(status)
+    }
+
+    /**
+     * Stop the streaming service even when the binder has not arrived yet.
+     * [onPaired] calls [ContextCompat.startForegroundService] then [bindService]; Cancel
+     * in that window used to unbind and return Home while the service kept streaming.
+     */
+    private fun stopStreamingFromUi() {
+        leaveRequested = true
+        val svc = streamingService
+        if (svc != null) {
+            svc.setCallback(null)
+            svc.stopFromActivity()
+            return
+        }
+        StreamingSession.clear()
+        if (StreamingService.isRunning || bound) {
+            ContextCompat.startForegroundService(this, StreamingService.stopIntent(this))
+        }
     }
 
     private fun hasCameraPermission(): Boolean =
@@ -517,6 +557,7 @@ class MainActivity : AppCompatActivity() {
         committedProfile = committed
         updateLiveUi()
 
+        leaveRequested = false
         pairingJob = lifecycleScope.launch {
             val rtp = withContext(Dispatchers.IO) { RtpIdentity.create() }
             rtpIdentity = rtp
@@ -549,6 +590,11 @@ class MainActivity : AppCompatActivity() {
         val current = payload ?: return
         val profile = committedProfile ?: return
         val rtp = rtpIdentity ?: return
+        if (leaveRequested) {
+            rtp.close()
+            rtpIdentity = null
+            return
+        }
         if (bound || StreamingService.isRunning) return
 
         StreamingSession.payload = current
@@ -649,15 +695,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Size the preview to nearly full width, matching the committed 16:9 canvas. */
+    /** Remember the committed canvas ratio and apply it from the laid-out card width. */
     private fun sizePreviewCard(streamWidth: Int, streamHeight: Int) {
         if (streamWidth <= 0 || streamHeight <= 0) return
-        val inset = (48 * resources.displayMetrics.density).toInt()
-        val cardWidth = (resources.displayMetrics.widthPixels - inset).coerceAtLeast(1)
-        val cardHeight = (cardWidth.toLong() * streamHeight / streamWidth).toInt().coerceAtLeast(1)
+        previewAspectWidth = streamWidth
+        previewAspectHeight = streamHeight
+        applyPreviewAspect()
+        if (binding.previewCard.width <= 0) {
+            binding.previewCard.post { applyPreviewAspect() }
+        }
+    }
+
+    /**
+     * Height follows the card's measured width (insets + page padding already applied),
+     * not raw [android.util.DisplayMetrics.widthPixels], so 16:9 holds in landscape,
+     * cutouts, and multi-window.
+     */
+    private fun applyPreviewAspect() {
+        val width = binding.previewCard.width
+        if (width <= 0 || previewAspectWidth <= 0) return
+        val height = (width.toLong() * previewAspectHeight / previewAspectWidth)
+            .toInt()
+            .coerceAtLeast(1)
         val params = binding.livePreview.layoutParams
-        params.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
-        params.height = cardHeight
+        if (params.width == ViewGroup.LayoutParams.MATCH_PARENT && params.height == height) return
+        params.width = ViewGroup.LayoutParams.MATCH_PARENT
+        params.height = height
         binding.livePreview.layoutParams = params
     }
 
