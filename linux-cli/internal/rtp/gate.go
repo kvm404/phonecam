@@ -300,6 +300,22 @@ func (g *Gate) now() time.Time {
 }
 
 func setRcvbuf(conn net.PacketConn, size int) error {
+	return withUDPSock(conn, func(fd int) error {
+		return syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, size)
+	})
+}
+
+func getRcvbuf(conn net.PacketConn) (int, error) {
+	var got int
+	err := withUDPSock(conn, func(fd int) error {
+		var sockErr error
+		got, sockErr = syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF)
+		return sockErr
+	})
+	return got, err
+}
+
+func withUDPSock(conn net.PacketConn, fn func(fd int) error) error {
 	udp, ok := conn.(*net.UDPConn)
 	if !ok {
 		return fmt.Errorf("packet conn is %T, not *net.UDPConn", conn)
@@ -310,7 +326,7 @@ func setRcvbuf(conn net.PacketConn, size int) error {
 	}
 	var sockErr error
 	if err := raw.Control(func(fd uintptr) {
-		sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, size)
+		sockErr = fn(int(fd))
 	}); err != nil {
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"net"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +50,39 @@ func TestNewGateEphemeralAndFixedPort(t *testing.T) {
 	defer rebound.Close()
 	if rebound.PublicRTPPort() != port {
 		t.Fatalf("expected public port %d, got %d", port, rebound.PublicRTPPort())
+	}
+}
+
+func TestNewGateSetsPublicRcvbuf(t *testing.T) {
+	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	if err := setRcvbuf(probe, PublicRcvbuf); err != nil {
+		probe.Close()
+		t.Fatalf("probe setRcvbuf: %v", err)
+	}
+	probeGot, err := getRcvbuf(probe)
+	probe.Close()
+	if err != nil {
+		t.Fatalf("probe getRcvbuf: %v", err)
+	}
+	if min(probeGot, probeGot/2) < PublicRcvbuf {
+		t.Skipf("kernel SO_RCVBUF effective %d < %d", min(probeGot, probeGot/2), PublicRcvbuf)
+	}
+
+	gate, err := NewGate(0)
+	if err != nil {
+		t.Fatalf("NewGate failed: %v", err)
+	}
+	defer gate.Close()
+
+	got, err := getRcvbuf(gate.public)
+	if err != nil {
+		t.Fatalf("getRcvbuf on public fd: %v", err)
+	}
+	if min(got, got/2) < PublicRcvbuf {
+		t.Fatalf("public fd SO_RCVBUF effective %d, want >= %d (raw %d)", min(got, got/2), PublicRcvbuf, got)
 	}
 }
 
@@ -177,8 +211,28 @@ func TestGateLearnsDifferentIPAfterGraceWithZeroHTTPForwards(t *testing.T) {
 }
 
 func TestGateDoesNotLearnBeforeGraceOrAfterHTTPForward(t *testing.T) {
-	gate, inner := startGate(t)
+	gate, err := NewGate(0)
+	if err != nil {
+		t.Fatalf("NewGate failed: %v", err)
+	}
 	defer gate.Close()
+
+	var mu sync.Mutex
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	gate.nowFn = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = gate.Run(ctx) }()
+
+	inner, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: gate.LocalRTPPort()})
+	if err != nil {
+		t.Fatalf("bind inner: %v", err)
+	}
 	defer inner.Close()
 
 	httpSrc := listenUDP(t, "127.0.0.1:0")
@@ -202,18 +256,22 @@ func TestGateDoesNotLearnBeforeGraceOrAfterHTTPForward(t *testing.T) {
 		t.Fatalf("write HTTP-IP packet: %v", err)
 	}
 	_ = readInner(t, inner)
+	st = waitStats(t, gate, func(s Stats) bool { return s.Forwarded == 1 })
+	if st.LearnedIP {
+		t.Fatalf("HTTP-IP forward must not learn: %+v", st)
+	}
 
-	old := learnGrace
-	learnGrace = time.Millisecond
-	t.Cleanup(func() { learnGrace = old })
-	time.Sleep(5 * time.Millisecond)
+	// Grace has elapsed, but HTTP-IP already forwarded — pin stays frozen.
+	mu.Lock()
+	now = now.Add(learnGrace + time.Second)
+	mu.Unlock()
 
 	if _, err := phone.WriteTo(rtpPacket(ssrc), gatePublic(t, gate)); err != nil {
 		t.Fatalf("write roam after HTTP forward: %v", err)
 	}
 	st = waitStats(t, gate, func(s Stats) bool { return s.DroppedACL >= 2 })
 	if st.LearnedIP || st.Forwarded != 1 {
-		t.Fatalf("HTTP-IP forward must freeze the pin: %+v", st)
+		t.Fatalf("HTTP-IP forward must freeze the pin after grace: %+v", st)
 	}
 }
 
