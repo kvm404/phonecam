@@ -18,6 +18,7 @@ type Media interface {
 	SetAllow(src pairing.RTPSource)
 	Stats() rtp.Stats
 	RestartReceiver(video pairing.VideoProfile) error
+	ReceiverRestarts() int
 }
 
 type Clock interface {
@@ -57,13 +58,14 @@ type approveRequest struct {
 }
 
 type statusResponse struct {
-	OK             bool   `json:"ok"`
-	Approved       bool   `json:"approved"`
-	Session        string `json:"session,omitempty"`
-	LastRTPms      *int64 `json:"last_rtp_ms,omitempty"`
-	PacketsFwd     uint64 `json:"packets_forwarded,omitempty"`
-	PacketsDropped uint64 `json:"packets_dropped_acl,omitempty"`
-	PacketsRecv    uint64 `json:"packets_received,omitempty"`
+	OK               bool   `json:"ok"`
+	Approved         bool   `json:"approved"`
+	Session          string `json:"session,omitempty"`
+	LastRTPms        *int64 `json:"last_rtp_ms,omitempty"`
+	PacketsFwd       uint64 `json:"packets_forwarded,omitempty"`
+	PacketsDropped   uint64 `json:"packets_dropped_acl,omitempty"`
+	PacketsRecv      uint64 `json:"packets_received,omitempty"`
+	ReceiverRestarts int    `json:"receiver_restarts,omitempty"`
 }
 
 type errorResponse struct {
@@ -206,6 +208,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if resp.Session != "" {
 		body["session"] = resp.Session
+	}
+	if n := s.media.ReceiverRestarts(); n != 0 {
+		body["receiver_restarts"] = n
 	}
 	if !st.LastPacket.IsZero() {
 		ms := s.clock.Now().Sub(st.LastPacket).Milliseconds()

@@ -13,7 +13,8 @@ import (
 )
 
 type stubMedia struct {
-	stats rtp.Stats
+	stats    rtp.Stats
+	restarts int
 }
 
 func (m stubMedia) SetAllow(pairing.RTPSource) {}
@@ -21,6 +22,8 @@ func (m stubMedia) SetAllow(pairing.RTPSource) {}
 func (m stubMedia) Stats() rtp.Stats { return m.stats }
 
 func (m stubMedia) RestartReceiver(pairing.VideoProfile) error { return nil }
+
+func (m stubMedia) ReceiverRestarts() int { return m.restarts }
 
 type fakeClock struct {
 	now time.Time
@@ -298,6 +301,33 @@ func TestStatusIncludesRTPCounters(t *testing.T) {
 		t.Fatalf("expected forwarded/received counters, got %#v", status)
 	}
 	if _, ok := mustJSONMap(t, recorder.Body.Bytes())["resume_token"]; ok {
+		t.Fatal("status must not include secrets")
+	}
+}
+
+func TestStatusIncludesReceiverRestarts(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now.Add(time.Second)},
+		Media:   stubMedia{restarts: 3},
+	}).Handler()
+
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	var status statusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
+		t.Fatalf("invalid status json: %v", err)
+	}
+	if status.ReceiverRestarts != 3 {
+		t.Fatalf("expected receiver_restarts=3, got %d", status.ReceiverRestarts)
+	}
+	body := mustJSONMap(t, recorder.Body.Bytes())
+	if _, ok := body["resume_token"]; ok {
 		t.Fatal("status must not include secrets")
 	}
 }

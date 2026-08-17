@@ -11,7 +11,9 @@ import (
 var errProcessFailed = errors.New("process failed")
 
 type fakeCommand struct {
-	err error
+	err    error
+	stdout string
+	stderr string
 }
 
 func (f fakeCommand) Run() error {
@@ -21,11 +23,17 @@ func (f fakeCommand) Run() error {
 	return f.err
 }
 
+func (f fakeCommand) Output() (string, string) {
+	return f.stdout, f.stderr
+}
+
 type recordingFactory struct {
-	mu   sync.Mutex
-	name string
-	args []string
-	err  error
+	mu     sync.Mutex
+	name   string
+	args   []string
+	err    error
+	stdout string
+	stderr string
 }
 
 func (f *recordingFactory) Command(ctx context.Context, name string, args ...string) Command {
@@ -34,7 +42,7 @@ func (f *recordingFactory) Command(ctx context.Context, name string, args ...str
 
 	f.name = name
 	f.args = append([]string(nil), args...)
-	return fakeCommand{err: f.err}
+	return fakeCommand{err: f.err, stdout: f.stdout, stderr: f.stderr}
 }
 
 func (f *recordingFactory) Recorded() (string, []string) {
@@ -108,6 +116,49 @@ func TestExecCommandIncludesCapturedOutputInError(t *testing.T) {
 	if !strings.Contains(err.Error(), "stderr detail") || !strings.Contains(err.Error(), "stdout detail") {
 		t.Fatalf("expected stderr and stdout details, got %v", err)
 	}
+}
+
+func TestRunnerLastOutputAfterFailedRun(t *testing.T) {
+	factory := &recordingFactory{
+		err:    errProcessFailed,
+		stdout: "pipeline notice",
+		stderr: "gst-launch-1.0: syntax error",
+	}
+	runner := NewRunner(factory.Command)
+	err := runner.Run(context.Background(), Config{RTPPort: 49322})
+	if !errors.Is(err, errProcessFailed) {
+		t.Fatalf("expected process failure, got %v", err)
+	}
+
+	stdout, stderr := runner.LastOutput()
+	if stdout != "pipeline notice" {
+		t.Fatalf("LastOutput stdout = %q, want pipeline notice", stdout)
+	}
+	if stderr != "gst-launch-1.0: syntax error" {
+		t.Fatalf("LastOutput stderr = %q, want gst-launch stderr", stderr)
+	}
+}
+
+func TestRunnerLastOutputEmptyWithoutCommandOutput(t *testing.T) {
+	factory := func(ctx context.Context, name string, args ...string) Command {
+		return runOnlyCommand{err: errProcessFailed}
+	}
+	runner := NewRunner(factory)
+	if err := runner.Run(context.Background(), Config{RTPPort: 49322}); err == nil {
+		t.Fatal("expected process failure")
+	}
+	stdout, stderr := runner.LastOutput()
+	if stdout != "" || stderr != "" {
+		t.Fatalf("expected empty LastOutput, got (%q, %q)", stdout, stderr)
+	}
+}
+
+type runOnlyCommand struct {
+	err error
+}
+
+func (c runOnlyCommand) Run() error {
+	return c.err
 }
 
 type blockingCommand struct {

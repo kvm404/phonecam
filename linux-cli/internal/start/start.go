@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/control"
@@ -36,13 +37,44 @@ const (
 // var so tests can shorten it.
 var approvalPollInterval = 200 * time.Millisecond
 
+// receiverRestartBackoff is the sleep after each unexpected gst-launch exit.
+// Tests shrink it. receiverHealthyAfter resets the sequence if a launch lived
+// that long before dying.
+var (
+	receiverRestartBackoff = []time.Duration{
+		250 * time.Millisecond,
+		time.Second,
+		2 * time.Second,
+	}
+	receiverHealthyAfter = 10 * time.Second
+)
+
 const (
 	receiverBindRetryWindow = 500 * time.Millisecond
 	receiverBindAttempts    = 5
 )
 
+type lastOutputter interface {
+	LastOutput() (stdout, stderr string)
+}
+
 type runtimeMedia struct {
 	gate *rtp.Gate
+
+	mu       sync.Mutex
+	started  bool
+	width    int
+	height   int
+	pending  *pairing.VideoProfile
+	restarts int
+	restart  chan struct{}
+}
+
+func newRuntimeMedia(gate *rtp.Gate) *runtimeMedia {
+	return &runtimeMedia{
+		gate:    gate,
+		restart: make(chan struct{}, 1),
+	}
 }
 
 func (m *runtimeMedia) SetAllow(src pairing.RTPSource) {
@@ -53,8 +85,64 @@ func (m *runtimeMedia) Stats() rtp.Stats {
 	return m.gate.Stats()
 }
 
-func (m *runtimeMedia) RestartReceiver(pairing.VideoProfile) error {
+func (m *runtimeMedia) ReceiverRestarts() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.restarts
+}
+
+// RestartReceiver never launches gst-launch. Before the first start it only
+// stashes the profile. After that, a WxH change signals the supervisor; same
+// WxH (including fps-only) is a no-op.
+func (m *runtimeMedia) RestartReceiver(video pairing.VideoProfile) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.started {
+		copied := video
+		m.pending = &copied
+		return nil
+	}
+	if video.Width == m.width && video.Height == m.height {
+		return nil
+	}
+	copied := video
+	m.pending = &copied
+	select {
+	case m.restart <- struct{}{}:
+	default:
+	}
 	return nil
+}
+
+func (m *runtimeMedia) applyStart(fallback pairing.VideoProfile) pairing.VideoProfile {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.pending != nil {
+		fallback = *m.pending
+		m.pending = nil
+	}
+	m.started = true
+	m.width = fallback.Width
+	m.height = fallback.Height
+	return fallback
+}
+
+func (m *runtimeMedia) addRestart() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.restarts++
+	return m.restarts
+}
+
+func (m *runtimeMedia) consumeRestart() bool {
+	select {
+	case <-m.restart:
+		return true
+	default:
+		return false
+	}
 }
 
 type System interface {
@@ -219,10 +307,11 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 	}
 	defer r.store.Remove()
 
+	media := newRuntimeMedia(gate)
 	server := &http.Server{
 		Handler: control.New(control.Config{
 			Session: pairSession,
-			Media:   &runtimeMedia{gate: gate},
+			Media:   media,
 		}).Handler(),
 	}
 	errCh := make(chan error, 1)
@@ -337,44 +426,188 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 	}
 	gate.SetAllow(src)
 
-	video := pairSession.NegotiatedVideo()
-	fmt.Fprintf(stdout, "Phone connected: receiving %dx%d@%d video\n", video.Width, video.Height, video.FPS)
+	return r.superviseReceiver(ctx, recvCtx, media, gate, pairSession, pairSession.NegotiatedVideo(), virtualCamera, stdout, errCh, gateErr, shutdownServer)
+}
 
-	receiverErr := make(chan error, 1)
-	go func() {
-		receiverErr <- r.runReceiver(recvCtx, gate, video, virtualCamera)
+func (r Runtime) superviseReceiver(
+	ctx context.Context,
+	recvCtx context.Context,
+	media *runtimeMedia,
+	gate *rtp.Gate,
+	pairSession *pairing.Session,
+	video pairing.VideoProfile,
+	device string,
+	stdout io.Writer,
+	errCh <-chan error,
+	gateErr <-chan error,
+	shutdownServer func(),
+) error {
+	stop := func(shutdown bool, err error) error {
+		if shutdown {
+			shutdownServer()
+		}
+		pairSession.Invalidate()
+		return err
+	}
+
+	backoffStep := 0
+	for i := 0; ; i++ {
+		video = media.applyStart(video)
+		if i == 0 {
+			fmt.Fprintf(stdout, "Phone connected: receiving %dx%d@%d video\n", video.Width, video.Height, video.FPS)
+		}
+
+		attemptCtx, attemptCancel := context.WithCancel(recvCtx)
+		receiverErr := make(chan error, 1)
+		go func(profile pairing.VideoProfile) {
+			receiverErr <- r.runReceiver(attemptCtx, gate, profile, device)
+		}(video)
+		startedAt := time.Now()
+
+		select {
+		case <-ctx.Done():
+			attemptCancel()
+			return stop(true, ctx.Err())
+		case err := <-errCh:
+			attemptCancel()
+			return stop(false, err)
+		case err := <-gateErr:
+			attemptCancel()
+			return stop(true, gateRunError(ctx, err))
+		case <-media.restart:
+			attemptCancel()
+			if err := waitReceiverExit(ctx, receiverErr); err != nil {
+				return stop(true, err)
+			}
+			backoffStep = 0
+			continue
+		case <-receiverErr:
+			attemptCancel()
+			if ctx.Err() != nil {
+				return stop(true, ctx.Err())
+			}
+			if media.consumeRestart() {
+				backoffStep = 0
+				continue
+			}
+
+			n := media.addRestart()
+			_, stderr := receiverLastOutput(r.receiver)
+			writeReceiverRestart(stdout, n, stderr)
+
+			delay := receiverRestartDelay(backoffStep)
+			if time.Since(startedAt) >= receiverHealthyAfter {
+				backoffStep = 0
+				delay = receiverRestartDelay(0)
+			} else if backoffStep+1 < len(receiverRestartBackoff) {
+				backoffStep++
+			}
+
+			switch outcome := waitBackoff(ctx, delay, errCh, gateErr, media.restart); outcome.kind {
+			case backoffContinue:
+			case backoffRestart:
+				backoffStep = 0
+			case backoffCancel:
+				return stop(true, ctx.Err())
+			case backoffServer:
+				return stop(false, outcome.err)
+			case backoffGate:
+				return stop(true, gateRunError(ctx, outcome.err))
+			}
+		}
+	}
+}
+
+type backoffKind int
+
+const (
+	backoffContinue backoffKind = iota
+	backoffRestart
+	backoffCancel
+	backoffServer
+	backoffGate
+)
+
+type backoffOutcome struct {
+	kind backoffKind
+	err  error
+}
+
+func waitBackoff(ctx context.Context, delay time.Duration, errCh, gateErr <-chan error, restart <-chan struct{}) backoffOutcome {
+	timer := time.NewTimer(delay)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
 	}()
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-		pairSession.Invalidate()
-		return ctx.Err()
+		return backoffOutcome{kind: backoffCancel}
 	case err := <-errCh:
-		pairSession.Invalidate()
-		return err
+		return backoffOutcome{kind: backoffServer, err: err}
 	case err := <-gateErr:
-		shutdownServer()
-		pairSession.Invalidate()
-		return gateRunError(ctx, err)
-	case err := <-receiverErr:
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-		pairSession.Invalidate()
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err == nil {
-			return fmt.Errorf("gstreamer receiver exited unexpectedly")
-		}
-		if strings.HasPrefix(err.Error(), "gstreamer receiver") {
-			return err
-		}
-		return fmt.Errorf("gstreamer receiver: %w", err)
+		return backoffOutcome{kind: backoffGate, err: err}
+	case <-restart:
+		return backoffOutcome{kind: backoffRestart}
+	case <-timer.C:
+		return backoffOutcome{kind: backoffContinue}
 	}
+}
+
+func waitReceiverExit(ctx context.Context, receiverErr <-chan error) error {
+	select {
+	case <-receiverErr:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func receiverRestartDelay(step int) time.Duration {
+	if len(receiverRestartBackoff) == 0 {
+		return 2 * time.Second
+	}
+	if step < 0 {
+		step = 0
+	}
+	if step >= len(receiverRestartBackoff) {
+		step = len(receiverRestartBackoff) - 1
+	}
+	return receiverRestartBackoff[step]
+}
+
+func receiverLastOutput(receiver Receiver) (string, string) {
+	if captured, ok := receiver.(lastOutputter); ok {
+		return captured.LastOutput()
+	}
+	return "", ""
+}
+
+func writeReceiverRestart(w io.Writer, n int, stderr string) {
+	msg := fmt.Sprintf("Restarting GStreamer receiver (%d)", n)
+	if snippet := outputSnippet(stderr); snippet != "" {
+		msg += ": " + snippet
+	}
+	fmt.Fprintln(w, msg)
+}
+
+func outputSnippet(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	const max = 200
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }
 
 func (r Runtime) runReceiver(ctx context.Context, gate *rtp.Gate, video pairing.VideoProfile, device string) error {

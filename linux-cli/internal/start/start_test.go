@@ -66,6 +66,12 @@ func init() {
 	// Shorten the approval poll so tests that gate the receiver on approval do
 	// not spend real time in the wait loop.
 	approvalPollInterval = 5 * time.Millisecond
+	receiverRestartBackoff = []time.Duration{
+		5 * time.Millisecond,
+		10 * time.Millisecond,
+		15 * time.Millisecond,
+	}
+	receiverHealthyAfter = 50 * time.Millisecond
 }
 
 // waitForPayload polls the run output until the pairing payload block has been
@@ -258,15 +264,17 @@ func (f fakeSystem) ListenPacket(network, address string) (net.PacketConn, error
 // blockingReceiver records the config it was given and blocks until the
 // context is cancelled, then returns ctx.Err().
 type blockingReceiver struct {
-	mu     sync.Mutex
-	config gstreamer.Config
-	got    bool
+	mu       sync.Mutex
+	config   gstreamer.Config
+	got      bool
+	attempts int
 }
 
 func (r *blockingReceiver) Run(ctx context.Context, config gstreamer.Config) error {
 	r.mu.Lock()
 	r.config = config
 	r.got = true
+	r.attempts++
 	r.mu.Unlock()
 
 	<-ctx.Done()
@@ -279,13 +287,10 @@ func (r *blockingReceiver) receivedConfig() (gstreamer.Config, bool) {
 	return r.config, r.got
 }
 
-// resultReceiver returns a fixed error (which may be nil) immediately.
-type resultReceiver struct {
-	err error
-}
-
-func (r resultReceiver) Run(ctx context.Context, config gstreamer.Config) error {
-	return r.err
+func (r *blockingReceiver) attemptCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.attempts
 }
 
 // fakePreflight records the device it was asked to verify and returns a fixed
@@ -454,38 +459,50 @@ func TestRunDefaultsVirtualCameraAndPassesItToReceiver(t *testing.T) {
 	}
 }
 
-func TestRunReturnsReceiverError(t *testing.T) {
-	receiver := resultReceiver{err: errors.New("boom")}
+func TestRunRestartsReceiverAfterCrash(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &flakyThenBlockReceiver{fails: 1, stderr: "gst-launch-1.0: syntax error"}
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{}, nil, &out)
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{}, nil, &out)
 	}()
 
-	approveViaHTTP(t, waitForPayload(t, &out), nil)
+	payload := waitForPayload(t, &out)
+	approveViaHTTP(t, payload, nil)
+	waitForReceiverAttemptsCounted(t, receiver, 2)
+	waitForOutput(t, &out, "Restarting GStreamer receiver (1): gst-launch-1.0: syntax error")
 
-	err := <-done
-	if err == nil {
-		t.Fatal("expected error from receiver failure")
+	status := getStatus(t, payload)
+	if status["receiver_restarts"] != float64(1) {
+		t.Fatalf("expected receiver_restarts=1, got %#v", status)
 	}
-	if !strings.Contains(err.Error(), "gstreamer receiver") || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("expected error mentioning receiver failure, got %v", err)
+	if _, ok := status["resume_token"]; ok {
+		t.Fatal("/status must not include secrets")
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
 	}
 }
 
-func TestRunReturnsErrorWhenReceiverExitsCleanly(t *testing.T) {
-	receiver := resultReceiver{err: nil}
+func TestRunRestartsReceiverAfterCleanExit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &flakyThenBlockReceiver{fails: 1, clean: true}
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(context.Background(), Config{}, nil, &out)
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{}, nil, &out)
 	}()
 
 	approveViaHTTP(t, waitForPayload(t, &out), nil)
+	waitForReceiverAttemptsCounted(t, receiver, 2)
+	waitForOutput(t, &out, "Restarting GStreamer receiver (1)")
 
-	err := <-done
-	if err == nil || !strings.Contains(err.Error(), "exited unexpectedly") {
-		t.Fatalf("expected exited unexpectedly error, got %v", err)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
 	}
 }
 
@@ -678,21 +695,25 @@ func TestRunWritesSessionRecordAndRemovesOnCancel(t *testing.T) {
 	}
 }
 
-func TestRunRemovesSessionRecordOnReceiverFailure(t *testing.T) {
+func TestRunRemovesSessionRecordOnCancelAfterCrash(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
 	store := &fakeStore{}
+	receiver := &flakyThenBlockReceiver{fails: 1}
 	var out lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- New(testSystem(), resultReceiver{err: errors.New("boom")}, &fakePreflight{}, store).Run(context.Background(), Config{}, nil, &out)
+		done <- New(testSystem(), receiver, &fakePreflight{}, store).Run(ctx, Config{}, nil, &out)
 	}()
 
 	approveViaHTTP(t, waitForPayload(t, &out), nil)
+	waitForReceiverAttemptsCounted(t, receiver, 2)
 
-	if err := <-done; err == nil {
-		t.Fatal("expected receiver failure error")
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
 	}
 	if store.removeCount() == 0 {
-		t.Fatal("expected session record removed after receiver failure")
+		t.Fatal("expected session record removed after cancel")
 	}
 }
 
@@ -876,6 +897,9 @@ func TestRunStatusIncludesGateCounters(t *testing.T) {
 	if _, ok := status["last_rtp_ms"]; !ok {
 		t.Fatalf("expected last_rtp_ms on /status, got %#v", status)
 	}
+	if _, ok := status["receiver_restarts"]; ok {
+		t.Fatalf("receiver_restarts should be omitted before a crash, got %#v", status)
+	}
 	if _, ok := status["resume_token"]; ok {
 		t.Fatal("/status must not include secrets")
 	}
@@ -998,4 +1022,235 @@ func mustCIDR(t *testing.T, value string) net.Addr {
 	}
 	network.IP = ip
 	return network
+}
+
+type flakyThenBlockReceiver struct {
+	mu       sync.Mutex
+	fails    int
+	clean    bool
+	stderr   string
+	attempts int
+}
+
+func (r *flakyThenBlockReceiver) Run(ctx context.Context, config gstreamer.Config) error {
+	r.mu.Lock()
+	r.attempts++
+	attempt := r.attempts
+	fails := r.fails
+	clean := r.clean
+	r.mu.Unlock()
+
+	if attempt <= fails {
+		if clean {
+			return nil
+		}
+		return errors.New("gst crashed")
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (r *flakyThenBlockReceiver) LastOutput() (string, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return "", r.stderr
+}
+
+func (r *flakyThenBlockReceiver) attemptCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.attempts
+}
+
+type attemptCounter interface {
+	attemptCount() int
+}
+
+func waitForReceiverAttemptsCounted(t *testing.T, r attemptCounter, want int) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if r.attemptCount() >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("receiver attempts=%d, want %d", r.attemptCount(), want)
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+func getStatus(t *testing.T, payload pairing.Payload) map[string]any {
+	t.Helper()
+	resp, err := http.Get(controlBase(t, payload) + "/status")
+	if err != nil {
+		t.Fatalf("GET /status: %v", err)
+	}
+	defer resp.Body.Close()
+	var status map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	return status
+}
+
+type countingFailReceiver struct {
+	mu       sync.Mutex
+	attempts int
+}
+
+func (r *countingFailReceiver) Run(ctx context.Context, config gstreamer.Config) error {
+	r.mu.Lock()
+	r.attempts++
+	r.mu.Unlock()
+	return errors.New("always crash")
+}
+
+func (r *countingFailReceiver) attemptCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.attempts
+}
+
+func TestRunCancelDuringReceiverBackoff(t *testing.T) {
+	oldBackoff := receiverRestartBackoff
+	receiverRestartBackoff = []time.Duration{time.Hour, time.Hour, time.Hour}
+	defer func() { receiverRestartBackoff = oldBackoff }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &countingFailReceiver{}
+	store := &fakeStore{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, store).Run(ctx, Config{}, nil, &out)
+	}()
+
+	approveViaHTTP(t, waitForPayload(t, &out), nil)
+	waitForReceiverAttemptsCounted(t, receiver, 1)
+	waitForOutput(t, &out, "Restarting GStreamer receiver (1)")
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+	if got := receiver.attemptCount(); got != 1 {
+		t.Fatalf("expected no launch during backoff, got %d attempts", got)
+	}
+	if store.removeCount() == 0 {
+		t.Fatal("expected session record removed on ctx cancel")
+	}
+}
+
+func TestRunDoesNotRestartRunningReceiver(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{}, nil, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	approveViaHTTP(t, payload, nil)
+	waitForReceiver(t, receiver)
+
+	time.Sleep(40 * time.Millisecond)
+	if got := receiver.attemptCount(); got != 1 {
+		t.Fatalf("running receiver must not be restarted, got %d attempts", got)
+	}
+	if strings.Contains(out.String(), "Restarting GStreamer receiver") {
+		t.Fatalf("silence is not a crash, got:\n%s", out.String())
+	}
+	status := getStatus(t, payload)
+	if _, ok := status["receiver_restarts"]; ok {
+		t.Fatalf("receiver_restarts should be omitted while the receiver is live, got %#v", status)
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRunCancelAfterApprovalInvalidatesSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	store := &fakeStore{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, store).Run(ctx, Config{}, nil, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	approveViaHTTP(t, payload, nil)
+	waitForReceiver(t, receiver)
+
+	status := getStatus(t, payload)
+	if approved, _ := status["approved"].(bool); !approved {
+		t.Fatalf("expected approved session before cancel, got %#v", status)
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+	if store.removeCount() == 0 {
+		t.Fatal("expected session record removed on ctx cancel")
+	}
+
+	resp, err := http.Get(controlBase(t, payload) + "/status")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected control server to be down after cancel")
+	}
+}
+
+func TestRestartReceiverStashesBeforeFirstStart(t *testing.T) {
+	media := newRuntimeMedia(nil)
+	want := pairing.VideoProfile{Width: 640, Height: 360, FPS: 30}
+	if err := media.RestartReceiver(want); err != nil {
+		t.Fatalf("RestartReceiver: %v", err)
+	}
+	got := media.applyStart(pairing.VideoProfile{Width: 1280, Height: 720, FPS: 30})
+	if got != want {
+		t.Fatalf("stashed profile not used on first start: got %#v want %#v", got, want)
+	}
+	if media.ReceiverRestarts() != 0 {
+		t.Fatalf("stash must not count as a restart, got %d", media.ReceiverRestarts())
+	}
+}
+
+func TestRestartReceiverNoopWhenWxHUnchanged(t *testing.T) {
+	media := newRuntimeMedia(nil)
+	media.applyStart(pairing.VideoProfile{Width: 1280, Height: 720, FPS: 30})
+	if err := media.RestartReceiver(pairing.VideoProfile{Width: 1280, Height: 720, FPS: 15}); err != nil {
+		t.Fatalf("RestartReceiver: %v", err)
+	}
+	select {
+	case <-media.restart:
+		t.Fatal("fps-only change must not signal a restart")
+	default:
+	}
+}
+
+func TestRestartReceiverSignalsWhenWxHChanges(t *testing.T) {
+	media := newRuntimeMedia(nil)
+	media.applyStart(pairing.VideoProfile{Width: 1280, Height: 720, FPS: 30})
+	want := pairing.VideoProfile{Width: 640, Height: 360, FPS: 30}
+	if err := media.RestartReceiver(want); err != nil {
+		t.Fatalf("RestartReceiver: %v", err)
+	}
+	select {
+	case <-media.restart:
+	default:
+		t.Fatal("WxH change must signal the supervisor")
+	}
+	got := media.applyStart(pairing.VideoProfile{Width: 1280, Height: 720, FPS: 30})
+	if got != want {
+		t.Fatalf("pending WxH not applied: got %#v want %#v", got, want)
+	}
 }
