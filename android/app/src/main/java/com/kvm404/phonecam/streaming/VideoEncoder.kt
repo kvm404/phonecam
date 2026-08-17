@@ -58,11 +58,14 @@ class VideoEncoder(
      * setInteger never throws, so those options can only be rejected at configure() time.
      *
      * So the whole configuration is NEGOTIATED as a matrix: for each color format (most
-     * compatible first) try a "full" variant (with CBR + baseline, which fix a real stutter on
-     * capable devices) then a "minimal" variant (only the four mandatory keys). The first combo
-     * that configures + starts wins; its color format drives the [encode] packing branch. The
-     * vivo stays on Flexible+full (CBR retained); the A03 falls through to the first combo that
-     * configures. If all combinations fail, [onError] fires and no codec is left half-initialized.
+     * compatible first) try FULL_INTRA (CBR + baseline + intra-refresh ≈ 1 s), then FULL
+     * (CBR + baseline, no intra-refresh), then MINIMAL (only the four mandatory keys).
+     * The first combo that configures + starts wins; its color format drives the [encode]
+     * packing branch. Devices that accept or ignore KEY_INTRA_REFRESH_PERIOD stay on
+     * FULL_INTRA — intra-refresh replaces KEY_I_FRAME_INTERVAL, so recovery still depends
+     * on [requestSyncFrame] / PARAMETER_KEY_REQUEST_SYNC_FRAME producing a real IDR. The
+     * A03 falls through to the first combo that configures. If all combinations fail,
+     * [onError] fires and no codec is left half-initialized.
      */
     fun start() {
         var lastError: Throwable? = null
@@ -122,7 +125,8 @@ class VideoEncoder(
     /**
      * Build the encoder [MediaFormat] for the given input [colorFormat] and [variant]. Every
      * variant sets the four mandatory keys (color format, bit rate, frame rate, i-frame
-     * interval); [FormatVariant.FULL] additionally sets CBR bitrate mode + baseline profile.
+     * interval). [FormatVariant.FULL] adds CBR + baseline; [FormatVariant.FULL_INTRA] adds
+     * those plus KEY_INTRA_REFRESH_PERIOD. [FormatVariant.MINIMAL] is keys only.
      */
     private fun buildFormat(colorFormat: Int, variant: FormatVariant): MediaFormat =
         MediaFormat.createVideoFormat(MIME, profile.width, profile.height).apply {
@@ -157,16 +161,12 @@ class VideoEncoder(
                 framesSinceSyncRequest++
                 bitrateController.shouldSkipEncode()
             }
-            if (skip) {
-                applyPendingParameters(c)
-                return
-            }
+            if (skip) return
 
             val index = c.dequeueInputBuffer(0)
             if (index < 0) {
                 // queue full -> drop this frame; the controller may step bitrate down
                 synchronized(lock) { bitrateController.onInputDrop() }
-                applyPendingParameters(c)
                 return
             }
 
@@ -210,49 +210,62 @@ class VideoEncoder(
     }
 
     /**
-     * Force an IDR now. Used after reconnect and when `/status.request_keyframe` is set.
-     * The periodic counter is private; this is the hook for a one-shot request.
+     * Request an IDR on the next queued frame. Used after reconnect and as a
+     * one-shot; the periodic counter is private.
      */
     fun requestSyncFrame() {
-        val c = codec
-        if (!running || c == null) return
-        synchronized(lock) { framesSinceSyncRequest = 0 }
-        applyParameters(c, bitrateBps = null, sync = true)
+        synchronized(lock) {
+            framesSinceSyncRequest = 0
+            bitrateController.noteRequestKeyframe()
+        }
     }
 
-    /** Receiver RTP age from GET /status `last_rtp_ms`. */
+    /**
+     * Receiver RTP age from GET /status `last_rtp_ms`. Every status read should
+     * call this (even when the age is small) so the 1 s cadence can clear.
+     * Applied on the next successful [encode] queue.
+     */
     fun noteReceiverAge(lastRtpMs: Long) {
         synchronized(lock) { bitrateController.noteReceiverAge(lastRtpMs) }
-        val c = codec
-        if (running && c != null) applyPendingParameters(c)
     }
 
-    /** `/status.request_keyframe`: 1 s cadence plus an immediate sync request. */
+    /**
+     * `/status.request_keyframe` one-shot. Call only together with
+     * [noteReceiverAge] for that same status body — never this hook alone,
+     * or the 1 s cadence has nothing to clear against.
+     */
     fun noteRequestKeyframe() {
         synchronized(lock) { bitrateController.noteRequestKeyframe() }
-        val c = codec
-        if (running && c != null) applyPendingParameters(c)
     }
 
+    /** Apply pending bitrate / sync only after a frame was queued. */
     private fun applyPendingParameters(c: MediaCodec) {
         val bitrate: Int?
-        val sync: Boolean
+        val forceSync: Boolean
+        val periodic: Boolean
+        val interval: Int
         synchronized(lock) {
             bitrate = if (bitrateController.consumeApplyBitrate()) {
                 bitrateController.bitrate()
             } else {
                 null
             }
-            val interval = bitrateController.syncIntervalSeconds()
-            val periodic = framesSinceSyncRequest >= profile.fps * interval
+            forceSync = bitrateController.consumeForceSync()
+            interval = bitrateController.syncIntervalSeconds()
+            periodic = framesSinceSyncRequest >= profile.fps * interval
             if (periodic) framesSinceSyncRequest = 0
-            sync = bitrateController.consumeForceSync() || periodic
         }
-        applyParameters(c, bitrate, sync)
+        if (!applyParameters(c, bitrate, forceSync || periodic)) {
+            synchronized(lock) {
+                if (bitrate != null) bitrateController.restoreApplyBitrate()
+                if (forceSync) bitrateController.restoreForceSync()
+                if (periodic) framesSinceSyncRequest = profile.fps * interval
+            }
+        }
     }
 
-    private fun applyParameters(c: MediaCodec, bitrateBps: Int?, sync: Boolean) {
-        if (bitrateBps == null && !sync) return
+    private fun applyParameters(c: MediaCodec, bitrateBps: Int?, sync: Boolean): Boolean {
+        if (bitrateBps == null && !sync) return true
         val params = Bundle()
         if (bitrateBps != null) {
             params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrateBps)
@@ -260,10 +273,11 @@ class VideoEncoder(
         if (sync) {
             params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
         }
-        try {
+        return try {
             c.setParameters(params)
+            true
         } catch (_: IllegalStateException) {
-            // Codec busy/released mid-flight: skip; next interval retries.
+            false
         }
     }
 

@@ -288,6 +288,10 @@ class StreamingService : LifecycleService() {
         val sender = UdpRtpSender(socket, target)
         val packetizer = RtpPacketizer(handoff.rtpIdentity.ssrc, RtpPacketizer.randomInitialSequenceNumber())
         val committed = handoff.profile
+        // Adaptation is drop-driven this PR. A later /status watchdog must call
+        // encoder.noteReceiverAge(last_rtp_ms) on every read, and
+        // encoder.noteRequestKeyframe() only when request_keyframe is set — never
+        // the keyframe hook alone.
         val encoder = VideoEncoder(
             committed,
             packetizer,

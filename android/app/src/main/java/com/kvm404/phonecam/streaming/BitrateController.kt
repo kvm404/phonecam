@@ -46,7 +46,7 @@ class BitrateController(
 
     /**
      * True once after a step-down or [noteRequestKeyframe]. [VideoEncoder] consumes
-     * this to fire PARAMETER_KEY_REQUEST_SYNC_FRAME.
+     * this to fire PARAMETER_KEY_REQUEST_SYNC_FRAME after a successful queue.
      */
     fun consumeForceSync(): Boolean {
         val force = pendingForceSync
@@ -54,11 +54,21 @@ class BitrateController(
         return force
     }
 
+    /** Re-arm [consumeForceSync] if MediaCodec rejected the last setParameters. */
+    fun restoreForceSync() {
+        pendingForceSync = true
+    }
+
     /** True once after [bitrate] changes so the encoder can apply PARAMETER_KEY_VIDEO_BITRATE. */
     fun consumeApplyBitrate(): Boolean {
         if (bitrateBps == publishedBitrateBps) return false
         publishedBitrateBps = bitrateBps
         return true
+    }
+
+    /** Re-arm [consumeApplyBitrate] if MediaCodec rejected the last setParameters. */
+    fun restoreApplyBitrate() {
+        publishedBitrateBps = publishedBitrateBps - 1
     }
 
     /** Close completed 1 s windows and maybe step up. */
@@ -94,16 +104,15 @@ class BitrateController(
     }
 
     /**
-     * Receiver RTP age from GET /status `last_rtp_ms`. ≥ 500 steps down (at most
-     * once per window). ≤ 400 clears a pending [noteRequestKeyframe] flag.
+     * Receiver RTP age from GET /status `last_rtp_ms`. Call this on **every**
+     * status read. Age above 400 ms switches to the 1 s sync cadence; ≤ 400
+     * clears it. Age ≥ 500 steps bitrate down (at most once per window).
      */
     fun noteReceiverAge(lastRtpMs: Long) {
         val age = if (lastRtpMs < 0) 0 else lastRtpMs
         this.lastRtpMs = age
         val now = nowMs()
-        if (age <= REQUEST_KEYFRAME_MS) {
-            requestKeyframe = false
-        }
+        requestKeyframe = age > REQUEST_KEYFRAME_MS
         if (age >= RTP_UNHEALTHY_MS) {
             rtpHealthySinceMs = null
             markUnhealthy(now)
@@ -120,9 +129,12 @@ class BitrateController(
         maybeStepUp(now)
     }
 
-    /** `/status.request_keyframe`: 1 s sync cadence plus an immediate one-shot. */
+    /**
+     * Immediate sync one-shot for `/status.request_keyframe`. Does not latch the
+     * 1 s cadence — that comes from [noteReceiverAge] when last_rtp_ms > 400.
+     * Do not call this without also passing the matching last_rtp_ms.
+     */
     fun noteRequestKeyframe() {
-        requestKeyframe = true
         pendingForceSync = true
     }
 

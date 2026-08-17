@@ -145,18 +145,39 @@ class BitrateControllerTest {
     }
 
     @Test
-    fun `requestKeyframe uses a one second cadence and an immediate one-shot`() {
+    fun `requestKeyframe is a one-shot and does not latch the degraded cadence`() {
         val c = controller(4_000_000)
         assertEquals(BitrateController.HEALTHY_SYNC_SECONDS, c.syncIntervalSeconds())
         assertFalse(c.consumeForceSync())
 
         c.noteRequestKeyframe()
-        assertEquals(BitrateController.DEGRADED_SYNC_SECONDS, c.syncIntervalSeconds())
+        assertEquals(BitrateController.HEALTHY_SYNC_SECONDS, c.syncIntervalSeconds())
         assertTrue(c.consumeForceSync())
         assertFalse(c.consumeForceSync())
+    }
+
+    @Test
+    fun `stale last rtp above 400 ms uses a one second cadence`() {
+        val c = controller(4_000_000)
+        c.noteReceiverAge(401)
+        assertEquals(4_000_000, c.bitrate())
+        assertEquals(BitrateController.DEGRADED_SYNC_SECONDS, c.syncIntervalSeconds())
 
         c.noteReceiverAge(100)
         assertEquals(BitrateController.HEALTHY_SYNC_SECONDS, c.syncIntervalSeconds())
+    }
+
+    @Test
+    fun `restore methods rearm bitrate and sync after a failed apply`() {
+        val c = controller(1_200_000)
+        closeBadWindow(c)
+        closeBadWindow(c)
+        assertTrue(c.consumeApplyBitrate())
+        assertTrue(c.consumeForceSync())
+        c.restoreApplyBitrate()
+        c.restoreForceSync()
+        assertTrue(c.consumeApplyBitrate())
+        assertTrue(c.consumeForceSync())
     }
 
     @Test
