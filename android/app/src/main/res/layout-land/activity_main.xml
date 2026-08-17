@@ -253,12 +253,9 @@
                         android:layout_height="180dp"
                         android:contentDescription="@string/preview_content_description" />
 
-                    <ImageView
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent"
-                        android:contentDescription="@null"
-                        android:scaleType="fitXY"
-                        android:src="@drawable/ic_viewfinder" />
+                    <include
+                        android:id="@+id/viewfinderOverlay"
+                        layout="@layout/viewfinder_overlay" />
                 </FrameLayout>
             </com.google.android.material.card.MaterialCardView>
 

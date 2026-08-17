@@ -793,10 +793,20 @@ class MainActivity : AppCompatActivity() {
         }
         val previewParams = binding.livePreview.layoutParams
         val previewWidth = if (landscape) width else ViewGroup.LayoutParams.MATCH_PARENT
-        if (previewParams.width == previewWidth && previewParams.height == height) return
-        previewParams.width = previewWidth
-        previewParams.height = height
-        binding.livePreview.layoutParams = previewParams
+        if (previewParams.width != previewWidth || previewParams.height != height) {
+            previewParams.width = previewWidth
+            previewParams.height = height
+            binding.livePreview.layoutParams = previewParams
+        }
+        // Overlay is match_parent of a wrap_content parent; pin it to the preview
+        // so the corners sit on the image in landscape, not a stretched 16:9 vector.
+        val overlay = binding.viewfinderOverlay.root
+        val overlayParams = overlay.layoutParams
+        if (overlayParams.width != previewWidth || overlayParams.height != height) {
+            overlayParams.width = previewWidth
+            overlayParams.height = height
+            overlay.layoutParams = overlayParams
+        }
 
         val cardParams = binding.previewCard.layoutParams
         if (landscape) {
