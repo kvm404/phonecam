@@ -1254,3 +1254,68 @@ func TestRestartReceiverSignalsWhenWxHChanges(t *testing.T) {
 		t.Fatalf("pending WxH not applied: got %#v want %#v", got, want)
 	}
 }
+
+func TestRestartReceiverRevertUsesPendingNotRunning(t *testing.T) {
+	media := newRuntimeMedia(nil)
+	media.applyStart(pairing.VideoProfile{Width: 1280, Height: 720, FPS: 30})
+	if err := media.RestartReceiver(pairing.VideoProfile{Width: 640, Height: 360, FPS: 30}); err != nil {
+		t.Fatalf("RestartReceiver: %v", err)
+	}
+	if err := media.RestartReceiver(pairing.VideoProfile{Width: 1280, Height: 720, FPS: 30}); err != nil {
+		t.Fatalf("RestartReceiver revert: %v", err)
+	}
+	got := media.applyStart(pairing.VideoProfile{Width: 1, Height: 1, FPS: 1})
+	if got != (pairing.VideoProfile{Width: 1280, Height: 720, FPS: 30}) {
+		t.Fatalf("revert must apply 1280x720, got %#v", got)
+	}
+}
+
+func TestRunRestartReceiverReloadsWxH(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	mediaCh := make(chan *runtimeMedia, 1)
+	attachRuntimeMedia = func(m *runtimeMedia) { mediaCh <- m }
+	defer func() { attachRuntimeMedia = nil }()
+
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{}, nil, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	var media *runtimeMedia
+	select {
+	case media = <-mediaCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime media was not attached")
+	}
+
+	approveViaHTTP(t, payload, &pairing.VideoProfile{Width: 1280, Height: 720, FPS: 30})
+	config := waitForReceiver(t, receiver)
+	if config.Width != 1280 || config.Height != 720 {
+		t.Fatalf("expected first launch 1280x720, got %dx%d", config.Width, config.Height)
+	}
+
+	if err := media.RestartReceiver(pairing.VideoProfile{Width: 640, Height: 360, FPS: 30}); err != nil {
+		t.Fatalf("RestartReceiver: %v", err)
+	}
+	waitForReceiverAttemptsCounted(t, receiver, 2)
+
+	config, _ = receiver.receivedConfig()
+	if config.Width != 640 || config.Height != 360 {
+		t.Fatalf("expected relaunch 640x360, got %dx%d", config.Width, config.Height)
+	}
+	if strings.Contains(out.String(), "Restarting GStreamer receiver") {
+		t.Fatalf("WxH restart must not be counted as a crash, got:\n%s", out.String())
+	}
+	status := getStatus(t, payload)
+	if _, ok := status["receiver_restarts"]; ok {
+		t.Fatalf("WxH restart must not increment receiver_restarts, got %#v", status)
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}

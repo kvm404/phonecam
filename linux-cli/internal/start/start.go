@@ -47,6 +47,8 @@ var (
 		2 * time.Second,
 	}
 	receiverHealthyAfter = 10 * time.Second
+	// attachRuntimeMedia, if set, receives the live Media once per Run.
+	attachRuntimeMedia func(*runtimeMedia)
 )
 
 const (
@@ -103,7 +105,11 @@ func (m *runtimeMedia) RestartReceiver(video pairing.VideoProfile) error {
 		m.pending = &copied
 		return nil
 	}
-	if video.Width == m.width && video.Height == m.height {
+	nextW, nextH := m.width, m.height
+	if m.pending != nil {
+		nextW, nextH = m.pending.Width, m.pending.Height
+	}
+	if video.Width == nextW && video.Height == nextH {
 		return nil
 	}
 	copied := video
@@ -308,6 +314,9 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 	defer r.store.Remove()
 
 	media := newRuntimeMedia(gate)
+	if attachRuntimeMedia != nil {
+		attachRuntimeMedia(media)
+	}
 	server := &http.Server{
 		Handler: control.New(control.Config{
 			Session: pairSession,
@@ -479,6 +488,9 @@ func (r Runtime) superviseReceiver(
 			if err := waitReceiverExit(ctx, receiverErr); err != nil {
 				return stop(true, err)
 			}
+			// A signal that arrived while gst-launch was dying already has
+			// its profile in pending; do not kill the launch we are about to start.
+			media.consumeRestart()
 			backoffStep = 0
 			continue
 		case <-receiverErr:

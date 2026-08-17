@@ -13,8 +13,8 @@ type Command interface {
 	Run() error
 }
 
-// commandOutput is optional on Command. Runner.LastOutput reads it after Run
-// so callers do not scrape error strings for gst-launch stderr.
+// commandOutput is optional on Command. recordOutput reads it after Run so
+// LastOutput is independent of error wrapping.
 type commandOutput interface {
 	Output() (stdout, stderr string)
 }
