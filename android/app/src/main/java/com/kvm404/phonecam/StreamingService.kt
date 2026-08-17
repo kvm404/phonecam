@@ -51,6 +51,32 @@ object StreamingSession {
     @Volatile var rtpIdentity: RtpIdentity? = null
     @Volatile var profile: VideoProfile? = null
 
+    data class Handoff(
+        val payload: PairingPayload,
+        val profile: VideoProfile,
+        val rtpIdentity: RtpIdentity,
+    )
+
+    @Synchronized
+    fun take(): Handoff? {
+        val currentPayload = payload ?: return null
+        val currentProfile = profile ?: return null
+        val currentRtp = rtpIdentity ?: return null
+        payload = null
+        profile = null
+        rtpIdentity = null
+        return Handoff(currentPayload, currentProfile, currentRtp)
+    }
+
+    @Synchronized
+    fun clearAndClose() {
+        rtpIdentity?.close()
+        payload = null
+        rtpIdentity = null
+        profile = null
+    }
+
+    @Synchronized
     fun clear() {
         payload = null
         rtpIdentity = null
@@ -225,28 +251,26 @@ class StreamingService : LifecycleService() {
     // ------------------------------------------------------------------ Streaming pipeline
 
     private fun startStreaming() {
-        val current = StreamingSession.payload
-        val profile = StreamingSession.profile
-        val rtp = StreamingSession.rtpIdentity
-        val socket = rtp?.socket
-        if (current == null || profile == null || rtp == null || socket == null) {
-            // Nothing to stream (e.g. the session was cleared); shut down quietly.
+        val handoff = StreamingSession.take()
+        val socket = handoff?.rtpIdentity?.socket
+        if (handoff == null || socket == null) {
+            handoff?.rtpIdentity?.close()
+            // Nothing to stream (e.g. the session was cleared/closed on Cancel).
             stopStreaming(error = null)
             return
         }
+        val current = handoff.payload
         payload = current
-        canvas = profile
-        rtpIdentity = rtp
+        canvas = handoff.profile
+        rtpIdentity = handoff.rtpIdentity
         previewWanted = pendingPreviewWanted
-        // Ownership of the session (and its socket) is now the service's.
-        StreamingSession.clear()
 
         startForegroundNotification(current.name)
 
         val target = InetSocketAddress(current.rtpHost, current.rtpPort)
         val sender = UdpRtpSender(socket, target)
-        val packetizer = RtpPacketizer(rtp.ssrc, RtpPacketizer.randomInitialSequenceNumber())
-        val encoder = VideoEncoder(profile, packetizer, sender) { error ->
+        val packetizer = RtpPacketizer(handoff.rtpIdentity.ssrc, RtpPacketizer.randomInitialSequenceNumber())
+        val encoder = VideoEncoder(handoff.profile, packetizer, sender) { error ->
             ContextCompat.getMainExecutor(this).execute {
                 stopStreaming(error = error.localizedMessage ?: error.toString())
             }

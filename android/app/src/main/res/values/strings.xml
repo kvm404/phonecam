@@ -6,6 +6,7 @@
 
     <!-- Home screen -->
     <string name="home_status_not_connected">Waiting to pair</string>
+    <string name="home_status_stopping">Stopping previous session…</string>
     <string name="home_status_disconnected">Disconnected</string>
     <string name="home_status_permission_needed">Camera permission is needed to scan the QR.</string>
     <string name="home_status_error">Error: %1$s</string>

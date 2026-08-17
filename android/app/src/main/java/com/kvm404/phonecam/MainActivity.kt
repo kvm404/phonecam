@@ -54,6 +54,7 @@ import com.kvm404.phonecam.pairing.StreamQuality
 import com.kvm404.phonecam.pairing.VideoProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -145,6 +146,10 @@ class MainActivity : AppCompatActivity() {
 
     /** Local viewfinder only. The laptop stream is independent of this flag. */
     private var previewVisible = true
+
+    private var stopWatchJob: Job? = null
+    @Volatile
+    private var waitingToStartService = false
 
     private var previewAspectWidth = 16
     private var previewAspectHeight = 9
@@ -364,6 +369,7 @@ class MainActivity : AppCompatActivity() {
         val colorRes = when {
             status.startsWith("Error") -> R.color.pc_tally
             status == getString(R.string.home_status_disconnected) -> R.color.pc_tungsten
+            status == getString(R.string.home_status_stopping) -> R.color.pc_tungsten
             status == getString(R.string.home_status_permission_needed) -> R.color.pc_tungsten
             else -> R.color.pc_tungsten_dim
         }
@@ -376,6 +382,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onScanConnectClicked() {
+        if (StreamingService.isRunning) {
+            showHome(getString(R.string.home_status_stopping))
+            watchServiceStop()
+            return
+        }
         if (hasCameraPermission()) {
             maybeRequestNotificationPermission()
             showScan()
@@ -434,7 +445,21 @@ class MainActivity : AppCompatActivity() {
     /** User-initiated stop of a live session (Leave / Cancel / back on Live), then Home. */
     private fun leaveSession(status: String) {
         stopStreamingFromUi()
-        teardownToHome(status)
+        val stopping = StreamingService.isRunning || bound
+        teardownToHome(
+            if (stopping) getString(R.string.home_status_stopping) else status,
+        )
+        if (stopping) watchServiceStop()
+    }
+
+    private fun watchServiceStop() {
+        stopWatchJob?.cancel()
+        stopWatchJob = lifecycleScope.launch {
+            while (StreamingService.isRunning) delay(40)
+            if (screenState == ScreenState.HOME) {
+                showHome(getString(R.string.home_status_not_connected))
+            }
+        }
     }
 
     /**
@@ -450,7 +475,7 @@ class MainActivity : AppCompatActivity() {
             svc.stopFromActivity()
             return
         }
-        StreamingSession.clear()
+        StreamingSession.clearAndClose()
         if (StreamingService.isRunning || bound) {
             ContextCompat.startForegroundService(this, StreamingService.stopIntent(this))
         }
@@ -627,7 +652,22 @@ class MainActivity : AppCompatActivity() {
             rtpIdentity = null
             return
         }
-        if (bound || StreamingService.isRunning) return
+        if (bound || StreamingService.isRunning) {
+            if (!waitingToStartService) {
+                waitingToStartService = true
+                lifecycleScope.launch {
+                    try {
+                        while ((bound || StreamingService.isRunning) && !leaveRequested) {
+                            delay(40)
+                        }
+                        if (!leaveRequested) onPaired()
+                    } finally {
+                        waitingToStartService = false
+                    }
+                }
+            }
+            return
+        }
 
         StreamingService.pendingPreviewWanted = previewVisible
         StreamingSession.payload = current
