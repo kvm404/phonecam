@@ -6,16 +6,27 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Size
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.res.ResourcesCompat
+import androidx.core.graphics.drawable.DrawableCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
@@ -43,6 +54,7 @@ import com.kvm404.phonecam.pairing.StreamQuality
 import com.kvm404.phonecam.pairing.VideoProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -122,10 +134,35 @@ class MainActivity : AppCompatActivity() {
     private var streamingService: StreamingService? = null
     private var bound = false
 
+    /**
+     * Set when the user hits Leave/Cancel (or Back on Live). [onPaired] starts the
+     * foreground service and binds asynchronously; if Cancel wins that race,
+     * [streamingService] is still null and [leaveSession] must stop via
+     * [StreamingService.stopIntent] plus this latch so [onServiceConnected] cannot
+     * attach a callback and keep the session alive.
+     */
+    @Volatile
+    private var leaveRequested = false
+
+    /** Local viewfinder only. The laptop stream is independent of this flag. */
+    private var previewVisible = true
+
+    private var stopWatchJob: Job? = null
+    @Volatile
+    private var waitingToStartService = false
+
+    private var previewAspectWidth = 16
+    private var previewAspectHeight = 9
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val svc = (service as StreamingService.LocalBinder).service
             streamingService = svc
+            if (leaveRequested) {
+                svc.setCallback(null)
+                svc.stopFromActivity()
+                return
+            }
             svc.setCallback(streamingCallback)
             // Adopt the session details (name/profile) the service holds, so a rebind after an
             // activity recreate can render the Live screen without the original payload.
@@ -172,7 +209,7 @@ class MainActivity : AppCompatActivity() {
                 maybeRequestNotificationPermission()
                 showScan()
             } else {
-                binding.homeStatusText.text = getString(R.string.home_status_permission_needed)
+                showHome(getString(R.string.home_status_permission_needed))
             }
         }
 
@@ -182,10 +219,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-
-        wireUp()
+        inflateChrome()
 
         if (StreamingService.isRunning) {
             // Reopened / recreated while a stream is live: rebind and show Live.
@@ -207,6 +241,69 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    /**
+     * The activity keeps [configChanges] so a live stream is not torn down on rotate.
+     * Re-inflate so [layout-land] is used; pairing and the bound service stay put.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val previous = screenState
+        val status = binding.homeStatusText.text?.toString()
+            ?: getString(R.string.home_status_not_connected)
+        inflateChrome()
+        when (previous) {
+            ScreenState.HOME -> showHome(status)
+            ScreenState.SCAN -> showScan()
+            ScreenState.LIVE -> {
+                showLive()
+                attachPreviewIfLive()
+            }
+        }
+    }
+
+    private fun inflateChrome() {
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        applyEdgeToEdge()
+        wireUp()
+        binding.root.requestApplyInsets()
+    }
+
+    private fun applyEdgeToEdge() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            binding.homeContainer.updatePadding(
+                left = bars.left,
+                top = bars.top,
+                right = bars.right,
+                bottom = bars.bottom,
+            )
+            binding.liveContainer.updatePadding(
+                left = bars.left,
+                top = bars.top,
+                right = bars.right,
+                bottom = bars.bottom,
+            )
+            val hintParams = binding.scanHint.layoutParams
+            if (hintParams is android.widget.FrameLayout.LayoutParams) {
+                hintParams.topMargin = bars.top + scanHintTopPad()
+                binding.scanHint.layoutParams = hintParams
+            }
+            val cancelParams = binding.scanCancelButton.layoutParams
+            if (cancelParams is android.widget.FrameLayout.LayoutParams) {
+                cancelParams.bottomMargin = bars.bottom + scanCancelBottomPad()
+                binding.scanCancelButton.layoutParams = cancelParams
+            }
+            applyPreviewAspect()
+            insets
+        }
+    }
+
+    private fun scanHintTopPad(): Int = (12 * resources.displayMetrics.density).toInt()
+
+    private fun scanCancelBottomPad(): Int = (20 * resources.displayMetrics.density).toInt()
+
     private fun wireUp() {
         binding.scanConnectButton.setOnClickListener { onScanConnectClicked() }
         binding.exitButton.setOnClickListener { finish() }
@@ -220,7 +317,12 @@ class MainActivity : AppCompatActivity() {
             streamingService?.flipCamera()
             attachPreviewIfLive()
         }
+        binding.previewToggleButton.setOnClickListener { togglePreviewVisible() }
+        binding.previewCard.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left != oldRight - oldLeft) applyPreviewAspect()
+        }
         setupQualitySelector()
+        previewVisible = prefs().getBoolean(PREF_PREVIEW_VISIBLE, true)
     }
 
     /**
@@ -257,12 +359,34 @@ class MainActivity : AppCompatActivity() {
     private fun showHome(status: String) {
         screenState = ScreenState.HOME
         binding.homeStatusText.text = status
+        paintHomeStatusDot(status)
         binding.homeContainer.visibility = View.VISIBLE
         binding.scanContainer.visibility = View.GONE
         binding.liveContainer.visibility = View.GONE
     }
 
+    private fun paintHomeStatusDot(status: String) {
+        val colorRes = when {
+            status.startsWith("Error") -> R.color.pc_tally
+            status == getString(R.string.home_status_disconnected) -> R.color.pc_tungsten
+            status == getString(R.string.home_status_stopping) -> R.color.pc_tungsten
+            status == getString(R.string.home_status_permission_needed) -> R.color.pc_tungsten
+            else -> R.color.pc_tungsten_dim
+        }
+        val color = ResourcesCompat.getColor(resources, colorRes, theme)
+        val base: Drawable = binding.homeStatusDot.background?.mutate()
+            ?: ResourcesCompat.getDrawable(resources, R.drawable.bg_status_dot, theme)
+            ?: return
+        DrawableCompat.setTint(base, color)
+        binding.homeStatusDot.background = base
+    }
+
     private fun onScanConnectClicked() {
+        if (StreamingService.isRunning) {
+            showHome(getString(R.string.home_status_stopping))
+            watchServiceStop()
+            return
+        }
         if (hasCameraPermission()) {
             maybeRequestNotificationPermission()
             showScan()
@@ -281,6 +405,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showScan() {
         screenState = ScreenState.SCAN
+        leaveRequested = false
         handledPayload = false
         binding.homeContainer.visibility = View.GONE
         binding.liveContainer.visibility = View.GONE
@@ -317,13 +442,43 @@ class MainActivity : AppCompatActivity() {
         showHome(status)
     }
 
-    /** User-initiated stop of a live session (Leave button / back on Live), then Home. */
+    /** User-initiated stop of a live session (Leave / Cancel / back on Live), then Home. */
     private fun leaveSession(status: String) {
-        streamingService?.let {
-            it.setCallback(null)
-            it.stopFromActivity()
+        stopStreamingFromUi()
+        val stopping = StreamingService.isRunning || bound
+        teardownToHome(
+            if (stopping) getString(R.string.home_status_stopping) else status,
+        )
+        if (stopping) watchServiceStop()
+    }
+
+    private fun watchServiceStop() {
+        stopWatchJob?.cancel()
+        stopWatchJob = lifecycleScope.launch {
+            while (StreamingService.isRunning) delay(40)
+            if (screenState == ScreenState.HOME) {
+                showHome(getString(R.string.home_status_not_connected))
+            }
         }
-        teardownToHome(status)
+    }
+
+    /**
+     * Stop the streaming service even when the binder has not arrived yet.
+     * [onPaired] calls [ContextCompat.startForegroundService] then [bindService]; Cancel
+     * in that window used to unbind and return Home while the service kept streaming.
+     */
+    private fun stopStreamingFromUi() {
+        leaveRequested = true
+        val svc = streamingService
+        if (svc != null) {
+            svc.setCallback(null)
+            svc.stopFromActivity()
+            return
+        }
+        StreamingSession.clearAndClose()
+        if (StreamingService.isRunning || bound) {
+            ContextCompat.startForegroundService(this, StreamingService.stopIntent(this))
+        }
     }
 
     private fun hasCameraPermission(): Boolean =
@@ -459,6 +614,7 @@ class MainActivity : AppCompatActivity() {
         committedProfile = committed
         updateLiveUi()
 
+        leaveRequested = false
         pairingJob = lifecycleScope.launch {
             val rtp = withContext(Dispatchers.IO) { RtpIdentity.create() }
             rtpIdentity = rtp
@@ -491,8 +647,29 @@ class MainActivity : AppCompatActivity() {
         val current = payload ?: return
         val profile = committedProfile ?: return
         val rtp = rtpIdentity ?: return
-        if (bound || StreamingService.isRunning) return
+        if (leaveRequested) {
+            rtp.close()
+            rtpIdentity = null
+            return
+        }
+        if (bound || StreamingService.isRunning) {
+            if (!waitingToStartService) {
+                waitingToStartService = true
+                lifecycleScope.launch {
+                    try {
+                        while ((bound || StreamingService.isRunning) && !leaveRequested) {
+                            delay(40)
+                        }
+                        if (!leaveRequested) onPaired()
+                    } finally {
+                        waitingToStartService = false
+                    }
+                }
+            }
+            return
+        }
 
+        StreamingService.pendingPreviewWanted = previewVisible
         StreamingSession.payload = current
         StreamingSession.profile = profile
         StreamingSession.rtpIdentity = rtp
@@ -543,26 +720,68 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ Live UI
 
-    /** Render the Live screen: "connecting" until the service is streaming, then "Live — <laptop>". */
+    /** Render the Live screen: connecting until the service is streaming, then REC + laptop name. */
     private fun updateLiveUi() {
         if (screenState != ScreenState.LIVE) return
         val streaming = isStreaming()
+        val profile = streamingService?.profile() ?: committedProfile ?: selectedQuality.toProfile()
+        binding.leaveButton.visibility = View.VISIBLE
+        binding.liveQualityCaption.visibility = View.VISIBLE
+        binding.liveQualityCaption.text = getString(
+            R.string.live_quality_caption,
+            profile.height,
+            profile.fps,
+        )
+        sizePreviewCard(profile.width, profile.height)
         if (streaming) {
             val name = streamingService?.laptopName() ?: payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_status, name)
-            binding.previewCard.visibility = View.VISIBLE
+            binding.liveRecBadge.visibility = View.VISIBLE
+            binding.liveConnectingProgress.visibility = View.GONE
             binding.flipCameraButton.visibility = View.VISIBLE
-            binding.leaveButton.visibility = View.VISIBLE
-            streamingService?.profile()?.let { sizePreviewCard(it.width, it.height) }
-            attachPreviewIfLive()
+            binding.previewToggleButton.visibility = View.VISIBLE
+            binding.leaveButton.setText(R.string.btn_leave)
+            applyPreviewVisibility()
             updateBatteryHint()
         } else {
             val name = payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_connecting, name)
-            binding.previewCard.visibility = View.GONE
+            binding.liveRecBadge.visibility = View.GONE
+            binding.liveConnectingProgress.visibility = View.VISIBLE
             binding.flipCameraButton.visibility = View.GONE
-            binding.leaveButton.visibility = View.GONE
+            binding.previewToggleButton.visibility = View.GONE
+            binding.leaveButton.setText(R.string.btn_cancel)
             binding.liveBatteryHint.visibility = View.GONE
+            binding.previewCard.visibility = View.VISIBLE
+            binding.previewHiddenHint.visibility = View.GONE
+        }
+    }
+
+    private fun togglePreviewVisible() {
+        previewVisible = !previewVisible
+        prefs().edit().putBoolean(PREF_PREVIEW_VISIBLE, previewVisible).apply()
+        applyPreviewVisibility()
+    }
+
+    private fun applyPreviewVisibility() {
+        if (screenState != ScreenState.LIVE) return
+        binding.previewCard.visibility = if (previewVisible) View.VISIBLE else View.GONE
+        binding.previewHiddenHint.visibility = if (previewVisible) View.GONE else View.VISIBLE
+        if (previewVisible) {
+            binding.previewToggleButton.setText(R.string.btn_hide_preview)
+            binding.previewToggleButton.setIconResource(R.drawable.ic_preview_hide)
+            if (isStreaming()) {
+                streamingService?.setPreviewWanted(true)
+                attachPreviewIfLive()
+            }
+            sizePreviewCard(
+                streamingService?.profile()?.width ?: committedProfile?.width ?: selectedQuality.width,
+                streamingService?.profile()?.height ?: committedProfile?.height ?: selectedQuality.height,
+            )
+        } else {
+            binding.previewToggleButton.setText(R.string.btn_show_preview)
+            binding.previewToggleButton.setIconResource(R.drawable.ic_preview_show)
+            streamingService?.setPreviewWanted(false)
         }
     }
 
@@ -575,20 +794,72 @@ class MainActivity : AppCompatActivity() {
 
     /** Attach the live preview to the service's Preview use case while visible + streaming. */
     private fun attachPreviewIfLive() {
-        if (screenState == ScreenState.LIVE && isStreaming()) {
+        if (screenState == ScreenState.LIVE && isStreaming() && previewVisible) {
             streamingService?.attachPreview(binding.livePreview.surfaceProvider)
         }
     }
 
-    /** Size the preview card to ~half the screen width, matching the committed aspect ratio. */
+    /** Remember the committed canvas ratio and apply it from the laid-out card width. */
     private fun sizePreviewCard(streamWidth: Int, streamHeight: Int) {
         if (streamWidth <= 0 || streamHeight <= 0) return
-        val cardWidth = resources.displayMetrics.widthPixels / 2
-        val cardHeight = (cardWidth.toLong() * streamHeight / streamWidth).toInt()
-        val params = binding.livePreview.layoutParams
-        params.width = cardWidth
-        params.height = cardHeight
-        binding.livePreview.layoutParams = params
+        previewAspectWidth = streamWidth
+        previewAspectHeight = streamHeight
+        applyPreviewAspect()
+        if (binding.liveStage.width <= 0) {
+            binding.liveStage.post { applyPreviewAspect() }
+        }
+    }
+
+    /**
+     * Fit the 16:9 canvas into [liveStage]. Portrait uses the stage width; landscape
+     * also caps height so a full-width preview cannot overflow the short side.
+     */
+    private fun applyPreviewAspect() {
+        val stage = binding.liveStage
+        val availW = stage.width
+        if (availW <= 0 || previewAspectWidth <= 0) return
+        val landscape =
+            resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val maxH = if (landscape && stage.height > 0) stage.height else Int.MAX_VALUE
+        var width = availW
+        var height = (width.toLong() * previewAspectHeight / previewAspectWidth)
+            .toInt()
+            .coerceAtLeast(1)
+        if (height > maxH) {
+            height = maxH
+            width = (height.toLong() * previewAspectWidth / previewAspectHeight)
+                .toInt()
+                .coerceAtLeast(1)
+        }
+        val previewParams = binding.livePreview.layoutParams
+        val previewWidth = if (landscape) width else ViewGroup.LayoutParams.MATCH_PARENT
+        if (previewParams.width != previewWidth || previewParams.height != height) {
+            previewParams.width = previewWidth
+            previewParams.height = height
+            binding.livePreview.layoutParams = previewParams
+        }
+        // Overlay is match_parent of a wrap_content parent; pin it to the preview
+        // so the corners sit on the image in landscape, not a stretched 16:9 vector.
+        val overlay = binding.viewfinderOverlay.root
+        val overlayParams = overlay.layoutParams
+        if (overlayParams.width != previewWidth || overlayParams.height != height) {
+            overlayParams.width = previewWidth
+            overlayParams.height = height
+            overlay.layoutParams = overlayParams
+        }
+
+        val cardParams = binding.previewCard.layoutParams
+        if (landscape) {
+            cardParams.width = ViewGroup.LayoutParams.WRAP_CONTENT
+            cardParams.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            if (cardParams is FrameLayout.LayoutParams) {
+                cardParams.gravity = Gravity.CENTER
+            }
+        } else {
+            cardParams.width = ViewGroup.LayoutParams.MATCH_PARENT
+            cardParams.height = ViewGroup.LayoutParams.WRAP_CONTENT
+        }
+        binding.previewCard.layoutParams = cardParams
     }
 
     /** Any pairing failure (pre-streaming): surface the reason on Home's status card. */
@@ -620,5 +891,9 @@ class MainActivity : AppCompatActivity() {
         barcodeScanner.close()
         // Close a not-yet-handed-off RTP socket, if any (pairing was still in flight).
         rtpIdentity?.close()
+    }
+
+    private companion object {
+        const val PREF_PREVIEW_VISIBLE = "preview_visible"
     }
 }

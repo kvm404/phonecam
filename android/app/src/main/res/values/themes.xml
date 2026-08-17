@@ -1,4 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.PhoneCam" parent="Theme.Material3.DayNight.NoActionBar" />
+    <!-- Always dark: this is a camera body, not a DayNight form. -->
+    <style name="Theme.PhoneCam" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:colorBackground">@color/pc_void</item>
+        <item name="android:windowBackground">@color/pc_void</item>
+        <item name="android:statusBarColor">@color/pc_void</item>
+        <item name="android:navigationBarColor">@color/pc_void</item>
+        <item name="android:windowLightStatusBar">false</item>
+
+        <item name="colorPrimary">@color/pc_tungsten</item>
+        <item name="colorOnPrimary">@color/pc_void</item>
+        <item name="colorPrimaryContainer">@color/pc_panel_raised</item>
+        <item name="colorOnPrimaryContainer">@color/pc_paper</item>
+        <item name="colorSecondary">@color/pc_tungsten</item>
+        <item name="colorOnSecondary">@color/pc_void</item>
+        <item name="colorSecondaryContainer">@color/pc_panel</item>
+        <item name="colorOnSecondaryContainer">@color/pc_paper</item>
+        <item name="colorTertiary">@color/pc_tally</item>
+        <item name="colorOnTertiary">@color/pc_paper</item>
+        <item name="colorError">@color/pc_tally</item>
+        <item name="colorOnError">@color/pc_paper</item>
+        <item name="colorErrorContainer">#3A1A16</item>
+        <item name="colorOnErrorContainer">#F5C4BE</item>
+        <item name="colorSurface">@color/pc_void</item>
+        <item name="colorOnSurface">@color/pc_paper</item>
+        <item name="colorOnSurfaceVariant">@color/pc_mist</item>
+        <item name="colorSurfaceVariant">@color/pc_panel</item>
+        <item name="colorOutline">@color/pc_line</item>
+        <item name="colorOutlineVariant">@color/pc_line</item>
+        <item name="android:textColorPrimary">@color/pc_paper</item>
+        <item name="android:textColorSecondary">@color/pc_mist</item>
+
+        <item name="materialButtonStyle">@style/Widget.PhoneCam.Button</item>
+        <item name="borderlessButtonStyle">@style/Widget.PhoneCam.Button.Text</item>
+        <item name="textAppearanceHeadlineLarge">@style/TextAppearance.PhoneCam.Wordmark</item>
+        <item name="textAppearanceTitleMedium">@style/TextAppearance.PhoneCam.Title</item>
+        <item name="textAppearanceBodyMedium">@style/TextAppearance.PhoneCam.Body</item>
+        <item name="textAppearanceBodySmall">@style/TextAppearance.PhoneCam.Caption</item>
+        <item name="textAppearanceLabelLarge">@style/TextAppearance.PhoneCam.Label</item>
+    </style>
 </resources>

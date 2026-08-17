@@ -51,6 +51,32 @@ object StreamingSession {
     @Volatile var rtpIdentity: RtpIdentity? = null
     @Volatile var profile: VideoProfile? = null
 
+    data class Handoff(
+        val payload: PairingPayload,
+        val profile: VideoProfile,
+        val rtpIdentity: RtpIdentity,
+    )
+
+    @Synchronized
+    fun take(): Handoff? {
+        val currentPayload = payload ?: return null
+        val currentProfile = profile ?: return null
+        val currentRtp = rtpIdentity ?: return null
+        payload = null
+        profile = null
+        rtpIdentity = null
+        return Handoff(currentPayload, currentProfile, currentRtp)
+    }
+
+    @Synchronized
+    fun clearAndClose() {
+        rtpIdentity?.close()
+        payload = null
+        rtpIdentity = null
+        profile = null
+    }
+
+    @Synchronized
     fun clear() {
         payload = null
         rtpIdentity = null
@@ -108,6 +134,10 @@ class StreamingService : LifecycleService() {
     private var wakeLock: PowerManager.WakeLock? = null
 
     private var cameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+    /** When false, only ImageAnalysis is bound — the laptop stream is unchanged. */
+    @Volatile
+    private var previewWanted = true
 
     @Volatile
     private var deviceOrientation = 0
@@ -188,6 +218,22 @@ class StreamingService : LifecycleService() {
         preview?.surfaceProvider = null
     }
 
+    /**
+     * Bind or drop the local Preview use case. ImageAnalysis (the encode path) stays bound,
+     * so hiding the viewfinder does not pause the laptop stream.
+     */
+    fun setPreviewWanted(wanted: Boolean) {
+        if (previewWanted == wanted) return
+        previewWanted = wanted
+        if (!streaming) return
+        val provider = cameraProvider ?: return
+        if (wanted) {
+            enablePreviewUseCase(provider)
+        } else {
+            disablePreviewUseCase(provider)
+        }
+    }
+
     fun flipCamera() {
         cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
             CameraSelector.DEFAULT_FRONT_CAMERA
@@ -205,27 +251,26 @@ class StreamingService : LifecycleService() {
     // ------------------------------------------------------------------ Streaming pipeline
 
     private fun startStreaming() {
-        val current = StreamingSession.payload
-        val profile = StreamingSession.profile
-        val rtp = StreamingSession.rtpIdentity
-        val socket = rtp?.socket
-        if (current == null || profile == null || rtp == null || socket == null) {
-            // Nothing to stream (e.g. the session was cleared); shut down quietly.
+        val handoff = StreamingSession.take()
+        val socket = handoff?.rtpIdentity?.socket
+        if (handoff == null || socket == null) {
+            handoff?.rtpIdentity?.close()
+            // Nothing to stream (e.g. the session was cleared/closed on Cancel).
             stopStreaming(error = null)
             return
         }
+        val current = handoff.payload
         payload = current
-        canvas = profile
-        rtpIdentity = rtp
-        // Ownership of the session (and its socket) is now the service's.
-        StreamingSession.clear()
+        canvas = handoff.profile
+        rtpIdentity = handoff.rtpIdentity
+        previewWanted = pendingPreviewWanted
 
         startForegroundNotification(current.name)
 
         val target = InetSocketAddress(current.rtpHost, current.rtpPort)
         val sender = UdpRtpSender(socket, target)
-        val packetizer = RtpPacketizer(rtp.ssrc, RtpPacketizer.randomInitialSequenceNumber())
-        val encoder = VideoEncoder(profile, packetizer, sender) { error ->
+        val packetizer = RtpPacketizer(handoff.rtpIdentity.ssrc, RtpPacketizer.randomInitialSequenceNumber())
+        val encoder = VideoEncoder(handoff.profile, packetizer, sender) { error ->
             ContextCompat.getMainExecutor(this).execute {
                 stopStreaming(error = error.localizedMessage ?: error.toString())
             }
@@ -298,19 +343,42 @@ class StreamingService : LifecycleService() {
     }
 
     private fun bindCamera(provider: ProcessCameraProvider) {
-        val previewUseCase = Preview.Builder().build()
-        preview = previewUseCase
         val analysis = buildAnalysis()
         // Seed the freshly-bound analyzer with the current device orientation so the first
         // frames (and any post-flip frames) are already upright before the sensor next fires.
         analysis.targetRotation = deviceOrientationToSurfaceRotation(deviceOrientation)
         imageAnalysis = analysis
         provider.unbindAll()
+        preview = null
         try {
-            provider.bindToLifecycle(this, cameraSelector, previewUseCase, analysis)
+            if (previewWanted) {
+                val previewUseCase = Preview.Builder().build()
+                preview = previewUseCase
+                provider.bindToLifecycle(this, cameraSelector, previewUseCase, analysis)
+            } else {
+                provider.bindToLifecycle(this, cameraSelector, analysis)
+            }
         } catch (e: Exception) {
             stopStreaming(error = e.localizedMessage ?: e.toString())
         }
+    }
+
+    private fun enablePreviewUseCase(provider: ProcessCameraProvider) {
+        if (preview != null) return
+        val previewUseCase = Preview.Builder().build()
+        try {
+            provider.bindToLifecycle(this, cameraSelector, previewUseCase)
+            preview = previewUseCase
+        } catch (_: Exception) {
+            preview = null
+        }
+    }
+
+    private fun disablePreviewUseCase(provider: ProcessCameraProvider) {
+        val existing = preview ?: return
+        existing.surfaceProvider = null
+        provider.unbind(existing)
+        preview = null
     }
 
     private fun buildAnalysis(): ImageAnalysis {
@@ -466,10 +534,10 @@ class StreamingService : LifecycleService() {
                 .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
             PendingIntent.FLAG_IMMUTABLE,
         )
-        val stopIntent = PendingIntent.getService(
+        val stopPending = PendingIntent.getService(
             this,
             1,
-            Intent(this, StreamingService::class.java).setAction(ACTION_STOP),
+            stopIntent(this),
             PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -480,7 +548,7 @@ class StreamingService : LifecycleService() {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .addAction(0, getString(R.string.notification_stop), stopIntent)
+            .addAction(0, getString(R.string.notification_stop), stopPending)
             .build()
     }
 
@@ -490,9 +558,17 @@ class StreamingService : LifecycleService() {
         var isRunning = false
             private set
 
+        /** Read once at [startStreaming] so the first bind can skip the viewfinder. */
+        @Volatile
+        var pendingPreviewWanted = true
+
         private const val CHANNEL_ID = "phonecam_streaming"
         private const val NOTIFICATION_ID = 1
         private const val ACTION_STOP = "com.kvm404.phonecam.action.STOP"
+
+        /** Same intent as the notification Stop action; works before the activity has a binder. */
+        fun stopIntent(context: Context): Intent =
+            Intent(context, StreamingService::class.java).setAction(ACTION_STOP)
 
         /** Safety valve so a wedged stream can never hold the CPU forever. */
         private const val WAKE_LOCK_TIMEOUT_MS = 12L * 60L * 60L * 1000L

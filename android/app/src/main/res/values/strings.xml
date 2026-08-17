@@ -1,34 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">PhoneCam</string>
-    <string name="tagline">Use your phone as a wireless webcam for your laptop.</string>
+    <string name="wordmark">PhoneCam</string>
+    <string name="tagline">Your phone is the webcam for this laptop.</string>
 
     <!-- Home screen -->
-    <string name="home_status_not_connected">Not connected</string>
+    <string name="home_status_not_connected">Waiting to pair</string>
+    <string name="home_status_stopping">Stopping previous session…</string>
     <string name="home_status_disconnected">Disconnected</string>
     <string name="home_status_permission_needed">Camera permission is needed to scan the QR.</string>
     <string name="home_status_error">Error: %1$s</string>
-    <string name="btn_scan_connect">Scan QR to connect</string>
+    <string name="btn_scan_connect">Scan QR</string>
     <string name="btn_exit">Exit</string>
 
     <!-- Quality selector -->
-    <string name="quality_label">Quality</string>
+    <string name="quality_label">Resolution</string>
+    <string name="quality_fps">30 fps</string>
     <string name="quality_high">720p</string>
     <string name="quality_medium">540p</string>
     <string name="quality_low">360p</string>
 
     <!-- Scan screen -->
-    <string name="scan_hint">Scan the QR from phonecam start</string>
+    <string name="scan_hint">Point at the QR from phonecam start</string>
     <string name="btn_cancel">Cancel</string>
 
     <!-- Live screen -->
     <string name="live_connecting">Connecting to %1$s…</string>
-    <string name="live_status">Live — %1$s</string>
-    <string name="btn_flip_camera">Flip camera</string>
+    <string name="live_status">%1$s</string>
+    <string name="live_badge">Live</string>
+    <string name="live_quality_caption">%1$dp · %2$d</string>
+    <string name="btn_flip_camera">Flip</string>
+    <string name="btn_hide_preview">Hide preview</string>
+    <string name="btn_show_preview">Show preview</string>
+    <string name="preview_hidden_hint">Preview hidden. Still streaming.</string>
     <string name="btn_leave">Leave</string>
 
     <string name="preview_content_description">Camera preview</string>
-    <string name="live_battery_hint">For reliable background streaming, allow PhoneCam unrestricted battery usage.</string>
+    <string name="live_battery_hint">Allow unrestricted battery so streaming survives the lock screen.</string>
 
     <!-- Foreground service notification -->
     <string name="notification_channel_name">PhoneCam</string>
