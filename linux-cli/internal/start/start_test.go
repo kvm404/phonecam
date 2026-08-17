@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -333,11 +334,21 @@ func TestRunPrintsPairingPayloadAndStopsOnContextCancel(t *testing.T) {
 	}()
 
 	payload := waitForPayload(t, &out)
+	_, publicPort, err := net.SplitHostPort(payload.RTP)
+	if err != nil {
+		t.Fatalf("parse advertised RTP %q: %v", payload.RTP, err)
+	}
+	if publicPort != "50123" {
+		t.Fatalf("expected QR/session RTP port 50123, got %s", publicPort)
+	}
 	approveViaHTTP(t, payload, nil)
 
 	config := waitForReceiver(t, receiver)
-	if config.RTPPort != 50123 {
-		t.Fatalf("expected receiver RTP port 50123, got %d", config.RTPPort)
+	if config.RTPPort == 50123 {
+		t.Fatal("receiver must use the gate inner port, not the public QR port 50123")
+	}
+	if config.RTPPort <= 0 {
+		t.Fatalf("expected allocated inner RTP port, got %d", config.RTPPort)
 	}
 	if config.Device != "/dev/video10" {
 		t.Fatalf("expected receiver device /dev/video10, got %q", config.Device)
@@ -347,7 +358,7 @@ func TestRunPrintsPairingPayloadAndStopsOnContextCancel(t *testing.T) {
 	}
 
 	cancel()
-	err := <-done
+	err = <-done
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context canceled, got %v", err)
 	}
@@ -427,7 +438,14 @@ func TestRunDefaultsVirtualCameraAndPassesItToReceiver(t *testing.T) {
 				t.Fatalf("expected receiver device %q, got %q", tc.wantDevice, config.Device)
 			}
 			if config.RTPPort <= 0 {
-				t.Fatalf("expected allocated RTP port, got %d", config.RTPPort)
+				t.Fatalf("expected allocated inner RTP port, got %d", config.RTPPort)
+			}
+			_, advertised, err := net.SplitHostPort(payload.RTP)
+			if err != nil {
+				t.Fatalf("parse advertised RTP %q: %v", payload.RTP, err)
+			}
+			if advertised == strconv.Itoa(config.RTPPort) {
+				t.Fatalf("receiver port %d must not equal advertised public RTP port", config.RTPPort)
 			}
 			if !strings.Contains(out.String(), "Virtual camera: "+tc.wantDevice) {
 				t.Fatalf("expected output to name virtual camera %q, got:\n%s", tc.wantDevice, out.String())
@@ -828,6 +846,74 @@ func TestRunHTTPApproveWithBlockingStdin(t *testing.T) {
 	}
 }
 
+func TestRunStatusIncludesGateCounters(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+		}, nil, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	approveViaHTTP(t, payload, nil)
+	waitForReceiver(t, receiver)
+
+	resp, err := http.Get(controlBase(t, payload) + "/status")
+	if err != nil {
+		t.Fatalf("GET /status: %v", err)
+	}
+	defer resp.Body.Close()
+	var status map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if _, ok := status["packets_dropped_acl"]; !ok {
+		t.Fatalf("expected packets_dropped_acl on /status, got %#v", status)
+	}
+	if _, ok := status["last_rtp_ms"]; !ok {
+		t.Fatalf("expected last_rtp_ms on /status, got %#v", status)
+	}
+	if _, ok := status["resume_token"]; ok {
+		t.Fatal("/status must not include secrets")
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRunRetriesReceiverBindError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &flakyBindReceiver{fails: 2}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+		}, nil, &out)
+	}()
+
+	approveViaHTTP(t, waitForPayload(t, &out), nil)
+	waitForReceiverAttempts(t, receiver, 3)
+
+	ports := receiver.portsCopy()
+	if len(ports) < 3 {
+		t.Fatalf("expected 3 launch attempts, got %v", ports)
+	}
+	if ports[0] == ports[1] || ports[1] == ports[2] {
+		t.Fatalf("bind retries must not reuse a failed inner port: %v", ports)
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
 func TestRunCancelWhilePromptPending(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	receiver := &blockingReceiver{}
@@ -853,6 +939,53 @@ func TestRunCancelWhilePromptPending(t *testing.T) {
 	}
 	if _, started := receiver.receivedConfig(); started {
 		t.Fatal("expected receiver not to start when cancelled at prompt")
+	}
+}
+
+type flakyBindReceiver struct {
+	mu       sync.Mutex
+	fails    int
+	attempts int
+	ports    []int
+}
+
+func (r *flakyBindReceiver) Run(ctx context.Context, config gstreamer.Config) error {
+	r.mu.Lock()
+	r.attempts++
+	r.ports = append(r.ports, config.RTPPort)
+	fails := r.fails
+	attempt := r.attempts
+	r.mu.Unlock()
+
+	if attempt <= fails {
+		return errors.New("could not bind to address")
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (r *flakyBindReceiver) portsCopy() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.ports...)
+}
+
+func waitForReceiverAttempts(t *testing.T, r *flakyBindReceiver, want int) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		r.mu.Lock()
+		got := r.attempts
+		r.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("receiver attempts=%d, want %d", got, want)
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 }
 

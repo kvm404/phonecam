@@ -10,7 +10,15 @@ import (
 	"time"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
+	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
 )
+
+// Media lets the control server pin the RTP gate and read its counters.
+type Media interface {
+	SetAllow(src pairing.RTPSource)
+	Stats() rtp.Stats
+	RestartReceiver(video pairing.VideoProfile) error
+}
 
 type Clock interface {
 	Now() time.Time
@@ -25,12 +33,14 @@ func (RealClock) Now() time.Time {
 type Server struct {
 	session *pairing.Session
 	clock   Clock
+	media   Media
 	mux     *http.ServeMux
 }
 
 type Config struct {
 	Session *pairing.Session
 	Clock   Clock
+	Media   Media
 }
 
 type pairRequest struct {
@@ -47,9 +57,13 @@ type approveRequest struct {
 }
 
 type statusResponse struct {
-	OK       bool   `json:"ok"`
-	Approved bool   `json:"approved"`
-	Session  string `json:"session,omitempty"`
+	OK             bool   `json:"ok"`
+	Approved       bool   `json:"approved"`
+	Session        string `json:"session,omitempty"`
+	LastRTPms      *int64 `json:"last_rtp_ms,omitempty"`
+	PacketsFwd     uint64 `json:"packets_forwarded,omitempty"`
+	PacketsDropped uint64 `json:"packets_dropped_acl,omitempty"`
+	PacketsRecv    uint64 `json:"packets_received,omitempty"`
 }
 
 type errorResponse struct {
@@ -65,6 +79,7 @@ func New(config Config) *Server {
 	server := &Server{
 		session: config.Session,
 		clock:   clock,
+		media:   config.Media,
 		mux:     http.NewServeMux(),
 	}
 	server.routes()
@@ -171,16 +186,37 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if s.session == nil {
-		writeJSON(w, http.StatusOK, statusResponse{OK: true})
+	resp := statusResponse{OK: true}
+	if s.session != nil {
+		resp.Approved = s.session.IsApproved()
+		resp.Session = s.session.Payload().SessionID
+	}
+	if s.media == nil {
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, statusResponse{
-		OK:       true,
-		Approved: s.session.IsApproved(),
-		Session:  s.session.Payload().SessionID,
-	})
+	st := s.media.Stats()
+	body := map[string]any{
+		"ok":                  resp.OK,
+		"approved":            resp.Approved,
+		"packets_forwarded":   st.Forwarded,
+		"packets_dropped_acl": st.DroppedACL,
+		"packets_received":    st.Received,
+	}
+	if resp.Session != "" {
+		body["session"] = resp.Session
+	}
+	if !st.LastPacket.IsZero() {
+		ms := s.clock.Now().Sub(st.LastPacket).Milliseconds()
+		if ms < 0 {
+			ms = 0
+		}
+		body["last_rtp_ms"] = ms
+	} else {
+		body["last_rtp_ms"] = nil
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func decodeJSON(r *http.Request, target any) error {

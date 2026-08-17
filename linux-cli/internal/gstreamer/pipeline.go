@@ -104,6 +104,7 @@ func PipelineArgs(config Config) ([]string, error) {
 	return []string{
 		"-q",
 		"udpsrc",
+		"address=127.0.0.1",
 		"port=" + strconv.Itoa(config.RTPPort),
 		// Keyframes arrive as bursts of hundreds of RTP packets; the kernel's
 		// default UDP receive buffer (~212KB) overflows and drops fragments,

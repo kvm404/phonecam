@@ -16,6 +16,7 @@ import (
 	"github.com/kvm404/phonecam/linux-cli/internal/gstreamer"
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
 	"github.com/kvm404/phonecam/linux-cli/internal/qrcode"
+	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
 	"github.com/kvm404/phonecam/linux-cli/internal/session"
 	"github.com/kvm404/phonecam/linux-cli/internal/v4l2"
 )
@@ -34,6 +35,27 @@ const (
 // session has been approved before starting the receiver. It is a package-level
 // var so tests can shorten it.
 var approvalPollInterval = 200 * time.Millisecond
+
+const (
+	receiverBindRetryWindow = 500 * time.Millisecond
+	receiverBindAttempts    = 5
+)
+
+type runtimeMedia struct {
+	gate *rtp.Gate
+}
+
+func (m *runtimeMedia) SetAllow(src pairing.RTPSource) {
+	m.gate.SetAllow(src)
+}
+
+func (m *runtimeMedia) Stats() rtp.Stats {
+	return m.gate.Stats()
+}
+
+func (m *runtimeMedia) RestartReceiver(pairing.VideoProfile) error {
+	return nil
+}
 
 type System interface {
 	Hostname() (string, error)
@@ -148,15 +170,15 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 	}
 	defer controlListener.Close()
 
-	rtpPort := config.RTPPort
-	if rtpPort == 0 {
-		rtpListener, err := listenUDP(r.system)
-		if err != nil {
-			return err
+	gate, err := rtp.NewGate(config.RTPPort)
+	if err != nil {
+		if config.RTPPort > 0 {
+			return fmt.Errorf("rtp port %d is busy (use --rtp-port to change): %w", config.RTPPort, err)
 		}
-		rtpPort = rtpListener.LocalAddr().(*net.UDPAddr).Port
-		_ = rtpListener.Close()
+		return err
 	}
+	defer gate.Close()
+	rtpPort := gate.PublicRTPPort()
 
 	hostname, err := r.system.Hostname()
 	if err != nil || hostname == "" {
@@ -198,7 +220,10 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 	defer r.store.Remove()
 
 	server := &http.Server{
-		Handler: control.New(control.Config{Session: pairSession}).Handler(),
+		Handler: control.New(control.Config{
+			Session: pairSession,
+			Media:   &runtimeMedia{gate: gate},
+		}).Handler(),
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -207,6 +232,11 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 			return
 		}
 		errCh <- nil
+	}()
+
+	gateErr := make(chan error, 1)
+	go func() {
+		gateErr <- gate.Run(recvCtx)
 	}()
 
 	writeStartOutput(stdout, virtualCamera, pairSession)
@@ -265,6 +295,10 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 		case err := <-errCh:
 			pairSession.Invalidate()
 			return err
+		case err := <-gateErr:
+			shutdownServer()
+			pairSession.Invalidate()
+			return gateRunError(ctx, err)
 		case answer := <-answerCh:
 			switch strings.ToLower(strings.TrimSpace(answer)) {
 			case "y", "yes":
@@ -290,18 +324,25 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 		}
 	}
 
+	src, ok := pairSession.ApprovedSource()
+	if !ok {
+		shutdownServer()
+		pairSession.Invalidate()
+		return fmt.Errorf("approved session has no RTP source")
+	}
+	if err := pairSession.BindRTPSource(src); err != nil {
+		shutdownServer()
+		pairSession.Invalidate()
+		return err
+	}
+	gate.SetAllow(src)
+
 	video := pairSession.NegotiatedVideo()
 	fmt.Fprintf(stdout, "Phone connected: receiving %dx%d@%d video\n", video.Width, video.Height, video.FPS)
 
 	receiverErr := make(chan error, 1)
 	go func() {
-		receiverErr <- r.receiver.Run(recvCtx, gstreamer.Config{
-			RTPPort: rtpPort,
-			Device:  virtualCamera,
-			Width:   video.Width,
-			Height:  video.Height,
-			FPS:     video.FPS,
-		})
+		receiverErr <- r.runReceiver(recvCtx, gate, video, virtualCamera)
 	}()
 
 	select {
@@ -314,6 +355,10 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 	case err := <-errCh:
 		pairSession.Invalidate()
 		return err
+	case err := <-gateErr:
+		shutdownServer()
+		pairSession.Invalidate()
+		return gateRunError(ctx, err)
 	case err := <-receiverErr:
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -330,6 +375,48 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 		}
 		return fmt.Errorf("gstreamer receiver: %w", err)
 	}
+}
+
+func (r Runtime) runReceiver(ctx context.Context, gate *rtp.Gate, video pairing.VideoProfile, device string) error {
+	var lastErr error
+	for attempt := 0; attempt < receiverBindAttempts; attempt++ {
+		if attempt > 0 {
+			if err := gate.RefreshLocalPort(); err != nil {
+				return err
+			}
+		}
+		started := time.Now()
+		err := r.receiver.Run(ctx, gstreamer.Config{
+			RTPPort: gate.LocalRTPPort(),
+			Device:  device,
+			Width:   video.Width,
+			Height:  video.Height,
+			FPS:     video.FPS,
+		})
+		if err == nil || ctx.Err() != nil || !isBindError(err) || time.Since(started) >= receiverBindRetryWindow {
+			return err
+		}
+		lastErr = err
+	}
+	return lastErr
+}
+
+func isBindError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "bind") || strings.Contains(msg, "address already in use") || strings.Contains(msg, "eaddrinuse")
+}
+
+func gateRunError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err == nil {
+		return fmt.Errorf("rtp gate exited unexpectedly")
+	}
+	return fmt.Errorf("rtp gate: %w", err)
 }
 
 func writeStartOutput(w io.Writer, virtualCamera string, pairSession *pairing.Session) {
@@ -370,18 +457,6 @@ func listenTCP(system System, port int) (net.Listener, error) {
 		address = fmt.Sprintf("0.0.0.0:%d", port)
 	}
 	return system.Listen("tcp", address)
-}
-
-func listenUDP(system System) (net.PacketConn, error) {
-	listener, err := system.ListenPacket("udp", "0.0.0.0:0")
-	if err != nil {
-		return nil, err
-	}
-	if _, ok := listener.LocalAddr().(*net.UDPAddr); !ok {
-		_ = listener.Close()
-		return nil, fmt.Errorf("udp listener returned address %T", listener.LocalAddr())
-	}
-	return listener, nil
 }
 
 func localIPv4(system System) (string, error) {

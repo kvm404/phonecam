@@ -14,6 +14,7 @@ func TestPipelineArgsBuildsV0Pipeline(t *testing.T) {
 	joined := strings.Join(args, " ")
 	for _, expected := range []string{
 		"udpsrc",
+		"address=127.0.0.1",
 		"port=49322",
 		"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000",
 		"rtpjitterbuffer",
@@ -51,6 +52,7 @@ func TestPipelineArgsUsesOverrides(t *testing.T) {
 
 	joined := strings.Join(args, " ")
 	for _, expected := range []string{
+		"address=127.0.0.1",
 		"port=5000",
 		"payload=97",
 		"latency=5",

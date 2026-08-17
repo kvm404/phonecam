@@ -86,27 +86,35 @@ const (
 	stateAlive                   // process is alive and its control server matches
 )
 
+type probeResult struct {
+	approved       bool
+	lastRTPms      *int64
+	packetsDropped uint64
+	packetsFwd     uint64
+	hasRTP         bool
+}
+
 // check performs the shared liveness check. When the process is dead or the
 // control server does not match the recorded session, it removes the stale file
 // and reports stateStale.
-func (m *Manager) check() (session.Record, bool, state) {
+func (m *Manager) check() (session.Record, probeResult, state) {
 	record, err := m.store.Read()
 	if err != nil {
-		return session.Record{}, false, stateNotRunning
+		return session.Record{}, probeResult{}, stateNotRunning
 	}
 
 	if !m.alive(record.PID) {
 		_ = m.store.Remove()
-		return record, false, stateStale
+		return record, probeResult{}, stateStale
 	}
 
-	approved, ok := m.probeControl(record)
+	probe, ok := m.probeControl(record)
 	if !ok {
 		_ = m.store.Remove()
-		return record, false, stateStale
+		return record, probeResult{}, stateStale
 	}
 
-	return record, approved, stateAlive
+	return record, probe, stateAlive
 }
 
 // alive reports whether pid is a live process we can signal.
@@ -117,37 +125,52 @@ func (m *Manager) alive(pid int) bool {
 // probeControl queries the control server's /status and confirms it reports the
 // recorded session id. approved reflects the pairing state; ok is false when the
 // server is unreachable, returns non-200, or reports a different session.
-func (m *Manager) probeControl(record session.Record) (approved, ok bool) {
+func (m *Manager) probeControl(record session.Record) (probeResult, bool) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/status", record.ControlPort)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return false, false
+		return probeResult{}, false
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return false, false
+		return probeResult{}, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false, false
+		return probeResult{}, false
 	}
 
 	var body struct {
-		Approved bool   `json:"approved"`
-		Session  string `json:"session"`
+		Approved       bool    `json:"approved"`
+		Session        string  `json:"session"`
+		LastRTPms      *int64  `json:"last_rtp_ms"`
+		PacketsDropped *uint64 `json:"packets_dropped_acl"`
+		PacketsFwd     *uint64 `json:"packets_forwarded"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return false, false
+		return probeResult{}, false
 	}
 	if body.Session != record.SessionID {
-		return false, false
+		return probeResult{}, false
 	}
-	return body.Approved, true
+	probe := probeResult{approved: body.Approved, lastRTPms: body.LastRTPms}
+	if body.LastRTPms != nil {
+		probe.hasRTP = true
+	}
+	if body.PacketsDropped != nil {
+		probe.hasRTP = true
+		probe.packetsDropped = *body.PacketsDropped
+	}
+	if body.PacketsFwd != nil {
+		probe.hasRTP = true
+		probe.packetsFwd = *body.PacketsFwd
+	}
+	return probe, true
 }
 
 // Status prints a status block and returns the process exit code.
 func (m *Manager) Status(stdout, stderr io.Writer) int {
-	record, approved, st := m.check()
+	record, probe, st := m.check()
 	switch st {
 	case stateNotRunning:
 		fmt.Fprintln(stdout, "PhoneCam is not running.")
@@ -158,7 +181,7 @@ func (m *Manager) Status(stdout, stderr io.Writer) int {
 	}
 
 	pairing := "Waiting for phone"
-	if approved {
+	if probe.approved {
 		pairing = "Phone paired and streaming target active"
 	}
 	uptime := m.now().Sub(record.StartedAt).Round(time.Second)
@@ -170,7 +193,17 @@ func (m *Manager) Status(stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  RTP port:       %d\n", record.RTPPort)
 	fmt.Fprintf(stdout, "  Virtual camera: %s\n", record.Device)
 	fmt.Fprintf(stdout, "  Pairing:        %s\n", pairing)
+	if probe.hasRTP {
+		fmt.Fprintf(stdout, "  RTP:            %s\n", formatRTPLine(probe))
+	}
 	return 0
+}
+
+func formatRTPLine(probe probeResult) string {
+	if probe.lastRTPms == nil {
+		return fmt.Sprintf("silent, %d fwd, %d acl drops", probe.packetsFwd, probe.packetsDropped)
+	}
+	return fmt.Sprintf("live, last packet %dms ago, %d fwd, %d acl drops", *probe.lastRTPms, probe.packetsFwd, probe.packetsDropped)
 }
 
 // Stop sends SIGTERM to the running process, waits up to stopSignalTimeout for

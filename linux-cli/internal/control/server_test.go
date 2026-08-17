@@ -9,7 +9,18 @@ import (
 	"time"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
+	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
 )
+
+type stubMedia struct {
+	stats rtp.Stats
+}
+
+func (m stubMedia) SetAllow(pairing.RTPSource) {}
+
+func (m stubMedia) Stats() rtp.Stats { return m.stats }
+
+func (m stubMedia) RestartReceiver(pairing.VideoProfile) error { return nil }
 
 type fakeClock struct {
 	now time.Time
@@ -251,6 +262,53 @@ func TestStatusReportsApproval(t *testing.T) {
 	if !status.Approved {
 		t.Fatalf("expected approved status, got %#v", status)
 	}
+}
+
+func TestStatusIncludesRTPCounters(t *testing.T) {
+	session, now := newTestSession(t)
+	last := now.Add(time.Second - 14*time.Millisecond)
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now.Add(time.Second)},
+		Media: stubMedia{stats: rtp.Stats{
+			Received:   10,
+			Forwarded:  8,
+			DroppedACL: 412,
+			LastPacket: last,
+		}},
+	}).Handler()
+
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	var status statusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
+		t.Fatalf("invalid status json: %v", err)
+	}
+	if status.LastRTPms == nil || *status.LastRTPms != 14 {
+		t.Fatalf("expected last_rtp_ms=14, got %#v", status.LastRTPms)
+	}
+	if status.PacketsDropped != 412 {
+		t.Fatalf("expected packets_dropped_acl=412, got %d", status.PacketsDropped)
+	}
+	if status.PacketsFwd != 8 || status.PacketsRecv != 10 {
+		t.Fatalf("expected forwarded/received counters, got %#v", status)
+	}
+	if _, ok := mustJSONMap(t, recorder.Body.Bytes())["resume_token"]; ok {
+		t.Fatal("status must not include secrets")
+	}
+}
+
+func mustJSONMap(t *testing.T, data []byte) map[string]any {
+	t.Helper()
+	var body map[string]any
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatalf("json map: %v", err)
+	}
+	return body
 }
 
 func TestApproveRejectsNonLocalRequest(t *testing.T) {

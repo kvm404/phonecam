@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
 )
 
 type fakeSystem struct {
@@ -245,6 +247,26 @@ func TestFirewallCheckInfoWhenNoFirewall(t *testing.T) {
 	}
 	if !strings.Contains(check.Message, "no active ufw or firewalld") {
 		t.Fatalf("expected no-firewall message, got %q", check.Message)
+	}
+}
+
+func TestUDPRcvbufCheckIsPresent(t *testing.T) {
+	report := Run(readySystem(fakeSystem{}))
+	check := findCheck(t, report, "UDP receive buffer")
+	if check.Status != StatusPass && check.Status != StatusWarn {
+		t.Fatalf("expected PASS or WARN for UDP receive buffer, got %s (%s)", check.Status, check.Message)
+	}
+	if report.HasFailures() && check.Status == StatusWarn {
+		t.Fatal("rcvbuf warning must not fail the report")
+	}
+}
+
+func TestRcvbufEffectiveWarnsBelow4MB(t *testing.T) {
+	if rcvbufEffective(rtp.PublicRcvbuf*2) < rtp.PublicRcvbuf {
+		t.Fatal("doubled 4MB getsockopt value should pass")
+	}
+	if rcvbufEffective(208*1024) >= rtp.PublicRcvbuf {
+		t.Fatal("default kernel rmem should warn")
 	}
 }
 
