@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
@@ -32,16 +33,21 @@ func (RealClock) Now() time.Time {
 }
 
 type Server struct {
-	session *pairing.Session
-	clock   Clock
-	media   Media
-	mux     *http.ServeMux
+	session     *pairing.Session
+	clock       Clock
+	media       Media
+	mux         *http.ServeMux
+	autoApprove bool
+	limiter     *reconnectLimiter
+	mu          sync.Mutex
+	camera      string
 }
 
 type Config struct {
-	Session *pairing.Session
-	Clock   Clock
-	Media   Media
+	Session     *pairing.Session
+	Clock       Clock
+	Media       Media
+	AutoApprove bool
 }
 
 type pairRequest struct {
@@ -51,6 +57,34 @@ type pairRequest struct {
 	RTPPort   int                   `json:"rtp_port"`
 	SSRC      uint32                `json:"ssrc"`
 	Video     *pairing.VideoProfile `json:"video"`
+	Camera    string                `json:"camera"`
+}
+
+type reconnectRequest struct {
+	Phone         pairing.Phone         `json:"phone"`
+	RTPPort       int                   `json:"rtp_port"`
+	SSRC          uint32                `json:"ssrc"`
+	Video         *pairing.VideoProfile `json:"video"`
+	ResumeToken   string                `json:"resume_token"`
+	PairingSecret string                `json:"pairing_secret"`
+	Camera        string                `json:"camera"`
+}
+
+type pairResponse struct {
+	OK          bool   `json:"ok"`
+	Approved    bool   `json:"approved"`
+	Session     string `json:"session,omitempty"`
+	ResumeToken string `json:"resume_token,omitempty"`
+}
+
+type reconnectResponse struct {
+	OK          bool                 `json:"ok"`
+	Approved    bool                 `json:"approved"`
+	Session     string               `json:"session,omitempty"`
+	ResumeToken string               `json:"resume_token,omitempty"`
+	Control     string               `json:"control,omitempty"`
+	RTP         string               `json:"rtp,omitempty"`
+	Video       pairing.VideoProfile `json:"video"`
 }
 
 type approveRequest struct {
@@ -58,14 +92,21 @@ type approveRequest struct {
 }
 
 type statusResponse struct {
-	OK               bool   `json:"ok"`
-	Approved         bool   `json:"approved"`
-	Session          string `json:"session,omitempty"`
-	LastRTPms        *int64 `json:"last_rtp_ms,omitempty"`
-	PacketsFwd       uint64 `json:"packets_forwarded,omitempty"`
-	PacketsDropped   uint64 `json:"packets_dropped_acl,omitempty"`
-	PacketsRecv      uint64 `json:"packets_received,omitempty"`
-	ReceiverRestarts int    `json:"receiver_restarts,omitempty"`
+	OK               bool                  `json:"ok"`
+	Approved         bool                  `json:"approved"`
+	Session          string                `json:"session,omitempty"`
+	PhoneName        string                `json:"phone_name,omitempty"`
+	PhoneID          string                `json:"phone_id,omitempty"`
+	Video            *pairing.VideoProfile `json:"video,omitempty"`
+	Camera           string                `json:"camera,omitempty"`
+	LastRTPms        *int64                `json:"last_rtp_ms,omitempty"`
+	PacketsFwd       uint64                `json:"packets_forwarded,omitempty"`
+	PacketsDropped   uint64                `json:"packets_dropped_acl,omitempty"`
+	PacketsRecv      uint64                `json:"packets_received,omitempty"`
+	ReceiverRestarts int                   `json:"receiver_restarts,omitempty"`
+	ReconnectReady   bool                  `json:"reconnect_ready,omitempty"`
+	ResumeToken      string                `json:"resume_token,omitempty"`
+	PairingSecret    string                `json:"pairing_secret,omitempty"`
 }
 
 type errorResponse struct {
@@ -79,10 +120,12 @@ func New(config Config) *Server {
 	}
 
 	server := &Server{
-		session: config.Session,
-		clock:   clock,
-		media:   config.Media,
-		mux:     http.NewServeMux(),
+		session:     config.Session,
+		clock:       clock,
+		media:       config.Media,
+		mux:         http.NewServeMux(),
+		autoApprove: config.AutoApprove,
+		limiter:     newReconnectLimiter(),
 	}
 	server.routes()
 	return server
@@ -97,6 +140,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /pairing", s.handlePairing)
 	s.mux.HandleFunc("POST /pair", s.handlePair)
 	s.mux.HandleFunc("POST /approve", s.handleApprove)
+	s.mux.HandleFunc("POST /reconnect", s.handleReconnect)
 	s.mux.HandleFunc("GET /status", s.handleStatus)
 }
 
@@ -147,12 +191,26 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		writePairingError(w, err)
 		return
 	}
+	s.storeCamera(request.Camera)
 
-	writeJSON(w, http.StatusAccepted, statusResponse{
-		OK:       true,
-		Approved: s.session.IsApproved(),
-		Session:  s.session.Payload().SessionID,
-	})
+	resp := pairResponse{
+		OK:      true,
+		Session: s.session.Payload().SessionID,
+	}
+	if !s.autoApprove {
+		writeJSON(w, http.StatusAccepted, resp)
+		return
+	}
+
+	if err := s.session.Approve(s.clock.Now()); err != nil {
+		writePairingError(w, err)
+		return
+	}
+	s.pinMedia()
+	resume, _, _ := s.session.TakeSecrets()
+	resp.Approved = true
+	resp.ResumeToken = resume
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
@@ -187,41 +245,218 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	resp := statusResponse{OK: true}
-	if s.session != nil {
-		resp.Approved = s.session.IsApproved()
-		resp.Session = s.session.Payload().SessionID
-	}
-	if s.media == nil {
-		writeJSON(w, http.StatusOK, resp)
+func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
+	if s.session == nil {
+		writeError(w, http.StatusServiceUnavailable, "no active pairing session")
 		return
 	}
 
-	st := s.media.Stats()
-	body := map[string]any{
-		"ok":                  resp.OK,
-		"approved":            resp.Approved,
-		"packets_forwarded":   st.Forwarded,
-		"packets_dropped_acl": st.DroppedACL,
-		"packets_received":    st.Received,
+	var request reconnectRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
 	}
-	if resp.Session != "" {
-		body["session"] = resp.Session
+
+	remoteIP, err := remoteIP(r.RemoteAddr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid remote address")
+		return
 	}
-	if n := s.media.ReceiverRestarts(); n != 0 {
-		body["receiver_restarts"] = n
+
+	if !s.limiter.allow(remoteIP.String(), request.Phone.ID, s.clock.Now()) {
+		writeError(w, http.StatusTooManyRequests, "rate limited")
+		return
 	}
-	if !st.LastPacket.IsZero() {
-		ms := s.clock.Now().Sub(st.LastPacket).Milliseconds()
-		if ms < 0 {
-			ms = 0
+
+	// pairing_secret is ignored this PR (no trust store). Resume is the only auth.
+	if !s.session.MatchResumeToken(request.ResumeToken) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	approved := s.session.ApprovedPhone()
+	if approved.ID != request.Phone.ID {
+		writeError(w, http.StatusConflict, pairing.ErrDifferentPhone.Error())
+		return
+	}
+
+	if request.Video != nil {
+		if err := s.session.SetNegotiatedVideo(*request.Video); err != nil {
+			writePairingError(w, err)
+			return
 		}
-		body["last_rtp_ms"] = ms
-	} else {
-		body["last_rtp_ms"] = nil
+	}
+
+	source := pairing.RTPSource{
+		IP:   remoteIP,
+		Port: request.RTPPort,
+		SSRC: request.SSRC,
+	}
+	if err := s.session.RebindRTPSource(source); err != nil {
+		writePairingError(w, err)
+		return
+	}
+	s.storeCamera(request.Camera)
+	s.pinMedia()
+
+	payload := s.session.Payload()
+	writeJSON(w, http.StatusOK, reconnectResponse{
+		OK:          true,
+		Approved:    true,
+		Session:     payload.SessionID,
+		ResumeToken: s.session.ResumeToken(),
+		Control:     payload.Control,
+		RTP:         payload.RTP,
+		Video:       s.session.NegotiatedVideo(),
+	})
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	body := map[string]any{
+		"ok":       true,
+		"approved": false,
+	}
+	if s.session != nil {
+		body["approved"] = s.session.IsApproved()
+		if id := s.session.Payload().SessionID; id != "" {
+			body["session"] = id
+		}
+		if s.session.IsApproved() {
+			phone := s.session.ApprovedPhone()
+			if phone.Name != "" {
+				body["phone_name"] = phone.Name
+			}
+			if phone.ID != "" {
+				body["phone_id"] = phone.ID
+			}
+			video := s.session.NegotiatedVideo()
+			body["video"] = video
+			if s.session.ReconnectReady() {
+				body["reconnect_ready"] = true
+			}
+		}
+	}
+	if camera := s.currentCamera(); camera != "" {
+		body["camera"] = camera
+	}
+	if s.media != nil {
+		st := s.media.Stats()
+		body["packets_forwarded"] = st.Forwarded
+		body["packets_dropped_acl"] = st.DroppedACL
+		body["packets_received"] = st.Received
+		if n := s.media.ReceiverRestarts(); n != 0 {
+			body["receiver_restarts"] = n
+		}
+		if !st.LastPacket.IsZero() {
+			ms := s.clock.Now().Sub(st.LastPacket).Milliseconds()
+			if ms < 0 {
+				ms = 0
+			}
+			body["last_rtp_ms"] = ms
+		} else {
+			body["last_rtp_ms"] = nil
+		}
+	}
+	if resume, secret := s.statusSecrets(r); resume != "" {
+		body["resume_token"] = resume
+		if secret != "" {
+			body["pairing_secret"] = secret
+		}
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) pinMedia() {
+	if s.media == nil || s.session == nil {
+		return
+	}
+	src, ok := s.session.ApprovedSource()
+	if !ok {
+		return
+	}
+	s.media.SetAllow(src)
+	_ = s.media.RestartReceiver(s.session.NegotiatedVideo())
+}
+
+func (s *Server) storeCamera(camera string) {
+	if camera == "" {
+		return
+	}
+	s.mu.Lock()
+	s.camera = camera
+	s.mu.Unlock()
+}
+
+func (s *Server) currentCamera() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.camera
+}
+
+// statusSecrets is the --require-approval one-shot. Loopback and AutoApprove
+// never receive standing credentials on GET /status.
+func (s *Server) statusSecrets(r *http.Request) (resume, pairing string) {
+	if s.autoApprove || s.session == nil || isLoopbackRequest(r.RemoteAddr) {
+		return "", ""
+	}
+	ip, err := remoteIP(r.RemoteAddr)
+	if err != nil {
+		return "", ""
+	}
+	approvedIP, ok := s.session.ApprovedControlIP()
+	if !ok || !approvedIP.Equal(ip) {
+		return "", ""
+	}
+	resume, pairing, ok = s.session.TakeSecrets()
+	if !ok {
+		return "", ""
+	}
+	return resume, pairing
+}
+
+const (
+	reconnectIPLimit     = 5
+	reconnectIPWindow    = time.Second
+	reconnectPhoneLimit  = 20
+	reconnectPhoneWindow = time.Minute
+)
+
+type reconnectLimiter struct {
+	mu     sync.Mutex
+	ips    map[string][]time.Time
+	phones map[string][]time.Time
+}
+
+func newReconnectLimiter() *reconnectLimiter {
+	return &reconnectLimiter{
+		ips:    make(map[string][]time.Time),
+		phones: make(map[string][]time.Time),
+	}
+}
+
+func (l *reconnectLimiter) allow(ip, phoneID string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	ipHits, ipOK := pruneAndLimit(l.ips[ip], now, reconnectIPWindow, reconnectIPLimit)
+	l.ips[ip] = ipHits
+	phoneHits, phoneOK := pruneAndLimit(l.phones[phoneID], now, reconnectPhoneWindow, reconnectPhoneLimit)
+	l.phones[phoneID] = phoneHits
+	return ipOK && phoneOK
+}
+
+func pruneAndLimit(prev []time.Time, now time.Time, window time.Duration, limit int) ([]time.Time, bool) {
+	cutoff := now.Add(-window)
+	kept := prev[:0]
+	for _, ts := range prev {
+		if ts.After(cutoff) {
+			kept = append(kept, ts)
+		}
+	}
+	if len(kept) >= limit {
+		return kept, false
+	}
+	return append(kept, now), true
 }
 
 func decodeJSON(r *http.Request, target any) error {

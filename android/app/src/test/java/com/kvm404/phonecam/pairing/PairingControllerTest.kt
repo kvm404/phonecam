@@ -53,8 +53,16 @@ class PairingControllerTest {
             statusCalls++
             statusResultOverride?.let { return it }
             val approved = statusCalls >= approveAfter
-            return StatusResult.Ok(approved = approved, session = "sess-123")
+            return StatusResult.Ok(
+                approved = approved,
+                session = "sess-123",
+                resumeToken = if (approved) "status-resume" else null,
+                pairingSecret = if (approved) "status-secret" else null,
+            )
         }
+
+        override fun reconnect(request: ReconnectRequest): ReconnectResult =
+            ReconnectResult.Failure("unused")
     }
 
     @Test
@@ -74,10 +82,36 @@ class PairingControllerTest {
         val state = controller.state.value
         assertTrue("expected Paired, was $state", state is PairingState.Paired)
         assertEquals(futurePayload, (state as PairingState.Paired).payload)
+        assertEquals("status-resume", state.resumeToken)
+        assertEquals("status-secret", state.pairingSecret)
         assertEquals(1, client.pairCalls)
         assertEquals(3, client.statusCalls)
         // The effective (rotated) profile is forwarded to POST /pair.
         assertEquals(video, client.lastVideo)
+    }
+
+    @Test
+    fun `approved pair short-circuits without status poll`() = runTest {
+        val client = FakeControlClient(
+            pairResult = PairResult.Accepted(
+                approved = true,
+                session = "sess-123",
+                resumeToken = "pair-resume",
+                pairingSecret = null,
+            ),
+        )
+        val controller = PairingController(client, phone, rtp, video, clock = { 0L })
+
+        controller.run(futurePayload)
+
+        val state = controller.state.value
+        assertTrue("expected Paired, was $state", state is PairingState.Paired)
+        state as PairingState.Paired
+        assertEquals(futurePayload, state.payload)
+        assertEquals("pair-resume", state.resumeToken)
+        assertEquals(null, state.pairingSecret)
+        assertEquals(1, client.pairCalls)
+        assertEquals(0, client.statusCalls)
     }
 
     @Test

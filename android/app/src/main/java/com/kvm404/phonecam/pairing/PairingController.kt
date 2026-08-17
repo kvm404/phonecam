@@ -11,7 +11,11 @@ sealed interface PairingState {
     data object Idle : PairingState
     data object Pairing : PairingState
     data object WaitingApproval : PairingState
-    data class Paired(val payload: PairingPayload) : PairingState
+    data class Paired(
+        val payload: PairingPayload,
+        val resumeToken: String,
+        val pairingSecret: String? = null,
+    ) : PairingState
     data class Failed(val message: String) : PairingState
 }
 
@@ -55,7 +59,11 @@ class PairingController(
             }
             is PairResult.Accepted -> {
                 if (result.approved) {
-                    _state.value = PairingState.Paired(payload)
+                    _state.value = PairingState.Paired(
+                        payload = payload,
+                        resumeToken = result.resumeToken.orEmpty(),
+                        pairingSecret = result.pairingSecret,
+                    )
                     return
                 }
             }
@@ -75,7 +83,11 @@ class PairingController(
                 }
                 is StatusResult.Ok -> {
                     if (result.approved) {
-                        _state.value = PairingState.Paired(payload)
+                        _state.value = PairingState.Paired(
+                            payload = payload,
+                            resumeToken = result.resumeToken.orEmpty(),
+                            pairingSecret = result.pairingSecret,
+                        )
                         return
                     }
                 }

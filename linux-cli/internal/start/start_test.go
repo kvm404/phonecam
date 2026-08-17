@@ -836,6 +836,35 @@ func TestRunAutoApproveSkipsPrompt(t *testing.T) {
 	}
 }
 
+func TestRunAutoApprovePairDoesNotLaunchReceiverTwice(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			VirtualCamera: "/dev/video10",
+			AutoApprove:   true,
+		}, nil, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	pairViaHTTP(t, payload, &pairing.VideoProfile{Width: 640, Height: 360, FPS: 30})
+	config := waitForReceiver(t, receiver)
+	if config.Width != 640 || config.Height != 360 {
+		t.Fatalf("expected first launch 640x360, got %dx%d", config.Width, config.Height)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := receiver.attemptCount(); got != 1 {
+		t.Fatalf("auto-approve /pair must not launch gst-launch twice, got %d", got)
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
 func TestRunHTTPApproveWithBlockingStdin(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	receiver := &blockingReceiver{}

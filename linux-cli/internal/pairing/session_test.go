@@ -119,6 +119,114 @@ func TestApprovalRequiresConsumedToken(t *testing.T) {
 	}
 }
 
+func TestApproveMintsResumeToken(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("expected approval to succeed: %v", err)
+	}
+	token := session.ResumeToken()
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		t.Fatalf("resume token is not base64url: %v", err)
+	}
+	if len(raw) != TokenBytes {
+		t.Fatalf("expected %d resume token bytes, got %d", TokenBytes, len(raw))
+	}
+	if err := session.Approve(now.Add(3 * time.Second)); err != nil {
+		t.Fatalf("expected re-approve to be idempotent: %v", err)
+	}
+	if session.ResumeToken() != token {
+		t.Fatal("re-approve must not rotate resume_token")
+	}
+}
+
+func TestTakeSecretsIsOneShotAndOmittedFromPayload(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("expected approval to succeed: %v", err)
+	}
+
+	data, err := session.PayloadJSON()
+	if err != nil {
+		t.Fatalf("PayloadJSON failed: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("payload JSON: %v", err)
+	}
+	if _, ok := raw["resume_token"]; ok {
+		t.Fatal("PayloadJSON must not include resume_token")
+	}
+	if _, ok := raw["pairing_secret"]; ok {
+		t.Fatal("PayloadJSON must not include pairing_secret")
+	}
+
+	resume, pairing, ok := session.TakeSecrets()
+	if !ok || resume == "" {
+		t.Fatalf("expected one-shot resume secret, got resume=%q ok=%v", resume, ok)
+	}
+	if pairing != "" {
+		t.Fatalf("pairing secret must be empty without a trust store, got %q", pairing)
+	}
+	if _, _, ok := session.TakeSecrets(); ok {
+		t.Fatal("TakeSecrets must be one-shot")
+	}
+}
+
+func TestRebindRTPSourceReplacesPin(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	original := RTPSource{IP: net.ParseIP("192.168.1.50"), Port: 50000, SSRC: 1234}
+	if err := session.RebindRTPSource(original); !errors.Is(err, ErrNotApproved) {
+		t.Fatalf("expected rebind to require approval, got %v", err)
+	}
+
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("expected token consumption to succeed: %v", err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("expected approval to succeed: %v", err)
+	}
+	if err := session.BindRTPSource(original); err != nil {
+		t.Fatalf("expected first bind to succeed: %v", err)
+	}
+
+	next := RTPSource{IP: net.ParseIP("192.168.1.60"), Port: 50001, SSRC: 99}
+	if err := session.RebindRTPSource(next); err != nil {
+		t.Fatalf("expected rebind to succeed: %v", err)
+	}
+	got, ok := session.ApprovedSource()
+	if !ok || !got.IP.Equal(next.IP) || got.Port != next.Port || got.SSRC != next.SSRC {
+		t.Fatalf("approved source after rebind %#v, want %#v", got, next)
+	}
+	if err := session.ValidateRTPSource(next); err != nil {
+		t.Fatalf("expected rebound source to validate: %v", err)
+	}
+	if err := session.BindRTPSource(next); err != nil {
+		t.Fatalf("expected same-source bind after rebind, got %v", err)
+	}
+	if err := session.BindRTPSource(original); !errors.Is(err, ErrAlreadyBound) {
+		t.Fatalf("expected old source to be already bound, got %v", err)
+	}
+
+	live := session.ResumeToken()
+	session.Invalidate()
+	if err := session.RebindRTPSource(next); !errors.Is(err, ErrInvalidated) {
+		t.Fatalf("expected invalidated rebind to fail, got %v", err)
+	}
+	if session.MatchResumeToken(live) {
+		t.Fatal("invalidated session must not match a resume token")
+	}
+}
+
 func TestPendingPhoneReflectsSessionLifecycle(t *testing.T) {
 	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	session := newTestSession(t, Config{Now: now})
