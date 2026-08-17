@@ -87,8 +87,10 @@ The v0.1 success bar is:
 - Local video relay through the cloud is out of scope for v0.1.
 - Optional STUN/WebRTC-style traversal is out of scope for v0.1.
 - Audio is out of scope for v0.1.
-- USB transport is out of scope for v0.1.
+- USB transport is out of scope for v0.1 and remains out of scope until v1.0.
 - Multi-phone support is out of scope for v0.1.
+- Persistent trusted-device pairing is out of scope for v0.1 and is a v0.2
+  goal; see [`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.md).
 
 ## Testing Decisions
 
@@ -112,10 +114,11 @@ The v0.1 success bar is:
 
 - iOS support.
 - Phone microphone/audio.
-- USB transport.
+- USB transport (until v1.0).
 - Polished GUI tray.
 - Multi-phone support.
-- Advanced camera controls.
+- Advanced camera controls (torch stays Later; front/back flip and the
+  720p/540p/360p selector shipped in v0.1).
 - Cloud TURN relay.
 - Remote-network usage.
 - Browser-native phone capture.

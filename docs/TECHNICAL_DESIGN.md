@@ -1,5 +1,10 @@
 # PhoneCam Linux v0.1 Technical Design
 
+This document is the v0.1 architecture. v0.2 scope and implementation
+contracts live in [`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.md)
+and [`docs/ROADMAP.md`](ROADMAP.md). USB transport stays a non-goal until v1.0.
+Torch and a latency measurement harness are unscheduled (Later), not v0.2.
+
 ## Goals
 
 - Deliver a low-latency Android-to-Linux virtual webcam.
@@ -190,6 +195,11 @@ The v0.1 pairing model is session-scoped:
 - RTP packets received before approval are ignored.
 - After approval, the Linux side pins the approved source IP/port and SSRC.
 - Packets from other sources or SSRCs are dropped.
+
+v0.1 code implements `BindRTPSource` / `ValidateRTPSource` and tests them, but
+the live receiver never calls them: after approval, `udpsrc` accepts any UDP on
+the RTP port. Enforcing that pin is a v0.2 goal (userspace UDP gate). See
+[`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.md).
 - Reuse of an expired or consumed token is rejected.
 - `phonecam stop` invalidates the session token.
 
@@ -270,7 +280,8 @@ Initial targets:
 - RTP source IP/port pinning after approval.
 - RTP SSRC validation after approval.
 - Packet rejection before approval.
-- No persistent trusted devices in v0.1.
+- No persistent trusted devices in v0.1. Persistent trusted pairing is a v0.2
+  goal; see [`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.md).
 - Document LAN threat model clearly.
 
 RTP/UDP is not encrypted by default in the first v0.1 implementation spike. The
