@@ -1,4 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Launcher (kept for existing adaptive icon) -->
     <color name="ic_launcher_background">#1E2A38</color>
+
+    <!-- Cinema-monitor palette. Tungsten is the brand; tally red is REC only. -->
+    <color name="pc_void">#0E1114</color>
+    <color name="pc_panel">#181C21</color>
+    <color name="pc_panel_raised">#1F252C</color>
+    <color name="pc_line">#2C333C</color>
+    <color name="pc_mist">#B7BFC8</color>
+    <color name="pc_dim">#7C858F</color>
+    <color name="pc_paper">#E8EAED</color>
+    <color name="pc_tungsten">#D7A25A</color>
+    <color name="pc_tungsten_dim">#8A6840</color>
+    <color name="pc_tally">#C43C2C</color>
+    <color name="pc_scrim">#990E1114</color>
 </resources>

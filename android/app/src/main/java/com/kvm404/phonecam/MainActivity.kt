@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -16,6 +17,12 @@ import android.view.WindowManager
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.res.ResourcesCompat
+import androidx.core.graphics.drawable.DrawableCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
@@ -184,6 +191,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        applyEdgeToEdge()
 
         wireUp()
 
@@ -206,6 +214,40 @@ class MainActivity : AppCompatActivity() {
             }
         })
     }
+
+    private fun applyEdgeToEdge() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            binding.homeContainer.updatePadding(
+                left = bars.left,
+                top = bars.top,
+                right = bars.right,
+                bottom = bars.bottom,
+            )
+            binding.liveContainer.updatePadding(
+                left = bars.left,
+                top = bars.top,
+                right = bars.right,
+                bottom = bars.bottom,
+            )
+            val hintParams = binding.scanHint.layoutParams
+            if (hintParams is android.widget.FrameLayout.LayoutParams) {
+                hintParams.topMargin = bars.top + scanHintTopPad()
+                binding.scanHint.layoutParams = hintParams
+            }
+            val cancelParams = binding.scanCancelButton.layoutParams
+            if (cancelParams is android.widget.FrameLayout.LayoutParams) {
+                cancelParams.bottomMargin = bars.bottom + scanCancelBottomPad()
+                binding.scanCancelButton.layoutParams = cancelParams
+            }
+            insets
+        }
+    }
+
+    private fun scanHintTopPad(): Int = (12 * resources.displayMetrics.density).toInt()
+
+    private fun scanCancelBottomPad(): Int = (20 * resources.displayMetrics.density).toInt()
 
     private fun wireUp() {
         binding.scanConnectButton.setOnClickListener { onScanConnectClicked() }
@@ -257,9 +299,25 @@ class MainActivity : AppCompatActivity() {
     private fun showHome(status: String) {
         screenState = ScreenState.HOME
         binding.homeStatusText.text = status
+        paintHomeStatusDot(status)
         binding.homeContainer.visibility = View.VISIBLE
         binding.scanContainer.visibility = View.GONE
         binding.liveContainer.visibility = View.GONE
+    }
+
+    private fun paintHomeStatusDot(status: String) {
+        val colorRes = when {
+            status.startsWith("Error") -> R.color.pc_tally
+            status == getString(R.string.home_status_disconnected) -> R.color.pc_tungsten
+            status == getString(R.string.home_status_permission_needed) -> R.color.pc_tungsten
+            else -> R.color.pc_tungsten_dim
+        }
+        val color = ResourcesCompat.getColor(resources, colorRes, theme)
+        val base: Drawable = binding.homeStatusDot.background?.mutate()
+            ?: ResourcesCompat.getDrawable(resources, R.drawable.bg_status_dot, theme)
+            ?: return
+        DrawableCompat.setTint(base, color)
+        binding.homeStatusDot.background = base
     }
 
     private fun onScanConnectClicked() {
@@ -543,25 +601,36 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ Live UI
 
-    /** Render the Live screen: "connecting" until the service is streaming, then "Live — <laptop>". */
+    /** Render the Live screen: connecting until the service is streaming, then REC + laptop name. */
     private fun updateLiveUi() {
         if (screenState != ScreenState.LIVE) return
         val streaming = isStreaming()
+        val profile = streamingService?.profile() ?: committedProfile ?: selectedQuality.toProfile()
+        binding.previewCard.visibility = View.VISIBLE
+        binding.leaveButton.visibility = View.VISIBLE
+        binding.liveQualityCaption.visibility = View.VISIBLE
+        binding.liveQualityCaption.text = getString(
+            R.string.live_quality_caption,
+            profile.height,
+            profile.fps,
+        )
+        sizePreviewCard(profile.width, profile.height)
         if (streaming) {
             val name = streamingService?.laptopName() ?: payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_status, name)
-            binding.previewCard.visibility = View.VISIBLE
+            binding.liveRecBadge.visibility = View.VISIBLE
+            binding.liveConnectingProgress.visibility = View.GONE
             binding.flipCameraButton.visibility = View.VISIBLE
-            binding.leaveButton.visibility = View.VISIBLE
-            streamingService?.profile()?.let { sizePreviewCard(it.width, it.height) }
+            binding.leaveButton.setText(R.string.btn_leave)
             attachPreviewIfLive()
             updateBatteryHint()
         } else {
             val name = payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_connecting, name)
-            binding.previewCard.visibility = View.GONE
+            binding.liveRecBadge.visibility = View.GONE
+            binding.liveConnectingProgress.visibility = View.VISIBLE
             binding.flipCameraButton.visibility = View.GONE
-            binding.leaveButton.visibility = View.GONE
+            binding.leaveButton.setText(R.string.btn_cancel)
             binding.liveBatteryHint.visibility = View.GONE
         }
     }
@@ -580,13 +649,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Size the preview card to ~half the screen width, matching the committed aspect ratio. */
+    /** Size the preview to nearly full width, matching the committed 16:9 canvas. */
     private fun sizePreviewCard(streamWidth: Int, streamHeight: Int) {
         if (streamWidth <= 0 || streamHeight <= 0) return
-        val cardWidth = resources.displayMetrics.widthPixels / 2
-        val cardHeight = (cardWidth.toLong() * streamHeight / streamWidth).toInt()
+        val inset = (48 * resources.displayMetrics.density).toInt()
+        val cardWidth = (resources.displayMetrics.widthPixels - inset).coerceAtLeast(1)
+        val cardHeight = (cardWidth.toLong() * streamHeight / streamWidth).toInt().coerceAtLeast(1)
         val params = binding.livePreview.layoutParams
-        params.width = cardWidth
+        params.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
         params.height = cardHeight
         binding.livePreview.layoutParams = params
     }
