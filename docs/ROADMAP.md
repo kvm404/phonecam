@@ -18,14 +18,13 @@
 
 ## v0.2: Reliability And Controls
 
-- USB mode.
-- Auto-reconnect.
-- Camera switching.
-- Resolution/FPS selector.
-- Torch toggle.
-- Persistent trusted device pairing.
-- Better degraded-network behavior.
-- Better latency measurement tooling.
+Design: [`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.md).
+
+- Auto-reconnect (in-session resume after a Wi-Fi drop).
+- Persistent trusted device pairing (next session without a new QR).
+- Better degraded-network behavior (stay live under loss).
+- Camera-switch polish (front/back flip already shipped; persist facing and fail safe).
+- Resolution/FPS leftovers (720p/540p/360p selector already shipped; bitrate-per-preset and optional 15 fps).
 
 ## v0.3: Desktop Experience
 
@@ -45,4 +44,11 @@
 - Complete Arch/Fedora/Ubuntu docs.
 - Reliable long-session behavior.
 - Published compatibility matrix.
+
+## Later (unscheduled)
+
+Deferred from v0.2; not part of the v0.3 desktop slice.
+
+- Torch toggle.
+- Latency measurement harness (`docs/BENCHMARKS.md` stays a template until then).
 
