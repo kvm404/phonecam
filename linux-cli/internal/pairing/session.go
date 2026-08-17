@@ -38,6 +38,7 @@ var (
 	ErrInvalidated      = errors.New("session is invalidated")
 	ErrNoPendingPhone   = errors.New("no pending phone approval")
 	ErrInvalidVideo     = errors.New("invalid video profile")
+	ErrDifferentPhone   = errors.New("a different phone is already approved")
 )
 
 const (
@@ -78,8 +79,8 @@ type Payload struct {
 }
 
 type Phone struct {
-	ID   string
-	Name string
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type TokenRequest struct {
@@ -111,6 +112,8 @@ type Session struct {
 	approvedPhone Phone
 	rtpSource     *RTPSource
 	negotiated    *VideoProfile
+	resumeToken   string
+	secretsTaken  bool
 }
 
 func New(config Config) (*Session, error) {
@@ -239,6 +242,9 @@ func (s *Session) Approve(now time.Time) error {
 	if s.invalidated {
 		return ErrInvalidated
 	}
+	if s.approved {
+		return nil
+	}
 	if s.isExpiredLocked(now) {
 		return ErrExpired
 	}
@@ -248,8 +254,14 @@ func (s *Session) Approve(now time.Time) error {
 	if s.pendingSource.IP == nil {
 		return ErrNoPendingPhone
 	}
+	token, err := randomBase64URL(TokenBytes)
+	if err != nil {
+		return err
+	}
 	s.approved = true
 	s.approvedPhone = s.pendingPhone
+	s.resumeToken = token
+	s.secretsTaken = false
 	return nil
 }
 
@@ -312,6 +324,107 @@ func (s *Session) Invalidate() {
 	s.consumed = true
 	s.approved = false
 	s.rtpSource = nil
+	s.resumeToken = ""
+	s.secretsTaken = true
+}
+
+// RebindRTPSource replaces the approved RTP pin. Same phone session only;
+// callers must reject a different phone.id before invoking this.
+func (s *Session) RebindRTPSource(source RTPSource) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.invalidated {
+		return ErrInvalidated
+	}
+	if !s.approved {
+		return ErrNotApproved
+	}
+	if source.SSRC == 0 {
+		return ErrInvalidSSRC
+	}
+	if source.IP == nil || !validPort(source.Port) {
+		return ErrInvalidEndpoint
+	}
+	pending := copyRTPSource(source)
+	bound := copyRTPSource(source)
+	s.pendingSource = pending
+	s.rtpSource = &bound
+	return nil
+}
+
+// SetNegotiatedVideo stores a reconnect-announced profile after approval.
+func (s *Session) SetNegotiatedVideo(video VideoProfile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.invalidated {
+		return ErrInvalidated
+	}
+	if !s.approved {
+		return ErrNotApproved
+	}
+	if err := validateVideoProfile(video); err != nil {
+		return err
+	}
+	copied := video
+	s.negotiated = &copied
+	return nil
+}
+
+// MatchResumeToken is a constant-time compare against the live resume token.
+func (s *Session) MatchResumeToken(token string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.approved || s.invalidated || s.resumeToken == "" || token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(s.resumeToken), []byte(token)) == 1
+}
+
+// ResumeToken returns the live in-session credential. It is not a QR field.
+func (s *Session) ResumeToken() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.approved || s.invalidated {
+		return ""
+	}
+	return s.resumeToken
+}
+
+// TakeSecrets returns resume and pairing secrets once. pairing is empty until
+// the trust store exists. Subsequent calls return ok=false.
+func (s *Session) TakeSecrets() (resume, pairing string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.secretsTaken || !s.approved || s.invalidated || s.resumeToken == "" {
+		return "", "", false
+	}
+	s.secretsTaken = true
+	return s.resumeToken, "", true
+}
+
+// ApprovedControlIP is the HTTP peer that consumed the QR token (or the last
+// rebind). Used for the require-approval one-shot /status delivery.
+func (s *Session) ApprovedControlIP() (net.IP, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.invalidated || !s.approved || s.pendingSource.IP == nil {
+		return nil, false
+	}
+	return append(net.IP(nil), s.pendingSource.IP...), true
+}
+
+// ReconnectReady reports that an in-session resume_token exists.
+func (s *Session) ReconnectReady() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.approved && !s.invalidated && s.resumeToken != ""
 }
 
 func (s *Session) BindRTPSource(source RTPSource) error {

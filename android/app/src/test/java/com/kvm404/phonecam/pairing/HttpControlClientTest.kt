@@ -250,4 +250,115 @@ class HttpControlClientTest {
         assertTrue(second is StatusResult.Ok)
         assertEquals(true, (second as StatusResult.Ok).approved)
     }
+
+    @Test
+    fun `pair treats HTTP 200 as failure`() {
+        val srv = TestHttpServer { _, path, _ ->
+            if (path == "/pair") {
+                200 to """{"ok":true,"approved":true,"session":"sess-123","resume_token":"secret"}"""
+            } else {
+                404 to """{"error":"not found"}"""
+            }
+        }
+        server = srv
+
+        val result = client(srv).pair(
+            payload,
+            phone,
+            rtpPort = 40000,
+            ssrc = 42L,
+            video = VideoProfile(1280, 720, 30),
+        )
+
+        assertTrue(result is PairResult.Failure)
+    }
+
+    @Test
+    fun `pair 202 extra keys are ignored and secrets parsed`() {
+        val srv = TestHttpServer { _, path, _ ->
+            if (path == "/pair") {
+                202 to """{"ok":true,"approved":true,"session":"sess-123","resume_token":"rt-1","pairing_secret":"ps-1","extra":true}"""
+            } else {
+                404 to """{"error":"not found"}"""
+            }
+        }
+        server = srv
+
+        val result = client(srv).pair(
+            payload,
+            phone,
+            rtpPort = 40000,
+            ssrc = 42L,
+            video = VideoProfile(1280, 720, 30),
+        )
+
+        assertTrue(result is PairResult.Accepted)
+        result as PairResult.Accepted
+        assertEquals(true, result.approved)
+        assertEquals("rt-1", result.resumeToken)
+        assertEquals("ps-1", result.pairingSecret)
+    }
+
+    @Test
+    fun `reconnect returns Ok on 200 and ignores extra keys`() {
+        var captured: String? = null
+        val srv = TestHttpServer { _, path, body ->
+            if (path == "/reconnect") {
+                captured = body
+                200 to """{"ok":true,"approved":true,"session":"sess-123","resume_token":"rt-live","control":"http://10.0.0.2:47470","rtp":"10.0.0.2:47471","video":{"width":640,"height":360,"fps":30},"extra":1}"""
+            } else {
+                404 to """{"error":"not found"}"""
+            }
+        }
+        server = srv
+
+        val result = client(srv).reconnect(
+            ReconnectRequest(
+                payload = payload,
+                phone = phone,
+                rtpPort = 40100,
+                ssrc = 99L,
+                video = VideoProfile(640, 360, 30),
+                resumeToken = "rt-live",
+                camera = "back",
+            ),
+        )
+
+        assertTrue(result is ReconnectResult.Ok)
+        result as ReconnectResult.Ok
+        assertEquals(true, result.approved)
+        assertEquals("sess-123", result.session)
+        assertEquals("rt-live", result.resumeToken)
+        assertEquals("http://10.0.0.2:47470", result.control)
+        assertEquals("10.0.0.2:47471", result.rtp)
+        assertEquals(VideoProfile(640, 360, 30), result.video)
+
+        val body = JSONObject(requireNotNull(captured))
+        assertEquals("phone-1", body.getJSONObject("phone").getString("id"))
+        assertEquals(40100, body.getInt("rtp_port"))
+        assertEquals(99L, body.getLong("ssrc"))
+        assertEquals("rt-live", body.getString("resume_token"))
+        assertEquals("back", body.getString("camera"))
+    }
+
+    @Test
+    fun `reconnect treats non-200 as failure`() {
+        val srv = TestHttpServer { _, _, _ ->
+            202 to """{"ok":true,"approved":true,"session":"sess-123","resume_token":"rt"}"""
+        }
+        server = srv
+
+        val result = client(srv).reconnect(
+            ReconnectRequest(
+                payload = payload,
+                phone = phone,
+                rtpPort = 40100,
+                ssrc = 99L,
+                video = VideoProfile(640, 360, 30),
+                resumeToken = "rt",
+            ),
+        )
+
+        assertTrue(result is ReconnectResult.Failure)
+    }
 }

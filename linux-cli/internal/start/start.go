@@ -319,8 +319,9 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 	}
 	server := &http.Server{
 		Handler: control.New(control.Config{
-			Session: pairSession,
-			Media:   media,
+			Session:     pairSession,
+			Media:       media,
+			AutoApprove: config.AutoApprove,
 		}).Handler(),
 	}
 	errCh := make(chan error, 1)
@@ -355,6 +356,7 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 
 	answerCh := make(chan string, 1)
 	var promptHandled bool
+	var autoApprovedHere bool
 
 	for !pairSession.IsApproved() {
 		// When the phone first consumes its token it becomes a pending phone
@@ -370,6 +372,7 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 						return err
 					}
 					fmt.Fprintf(stdout, "Auto-approved phone %q.\n", phone.Name)
+					autoApprovedHere = true
 					continue
 				}
 				fmt.Fprintf(stdout, "Phone %q wants to connect. Approve? [y/N] ", phone.Name)
@@ -420,6 +423,11 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 				fmt.Fprintf(stdout, "\nApproved via control API.\n")
 			}
 		}
+	}
+
+	// handlePair AutoApprove approves before PendingPhone is observed here.
+	if config.AutoApprove && !autoApprovedHere {
+		fmt.Fprintf(stdout, "Auto-approved phone %q.\n", pairSession.ApprovedPhone().Name)
 	}
 
 	src, ok := pairSession.ApprovedSource()
