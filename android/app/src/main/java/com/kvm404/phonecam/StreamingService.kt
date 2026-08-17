@@ -109,6 +109,10 @@ class StreamingService : LifecycleService() {
 
     private var cameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
+    /** When false, only ImageAnalysis is bound — the laptop stream is unchanged. */
+    @Volatile
+    private var previewWanted = true
+
     @Volatile
     private var deviceOrientation = 0
     private var orientationListener: OrientationEventListener? = null
@@ -188,6 +192,22 @@ class StreamingService : LifecycleService() {
         preview?.surfaceProvider = null
     }
 
+    /**
+     * Bind or drop the local Preview use case. ImageAnalysis (the encode path) stays bound,
+     * so hiding the viewfinder does not pause the laptop stream.
+     */
+    fun setPreviewWanted(wanted: Boolean) {
+        if (previewWanted == wanted) return
+        previewWanted = wanted
+        if (!streaming) return
+        val provider = cameraProvider ?: return
+        if (wanted) {
+            enablePreviewUseCase(provider)
+        } else {
+            disablePreviewUseCase(provider)
+        }
+    }
+
     fun flipCamera() {
         cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
             CameraSelector.DEFAULT_FRONT_CAMERA
@@ -217,6 +237,7 @@ class StreamingService : LifecycleService() {
         payload = current
         canvas = profile
         rtpIdentity = rtp
+        previewWanted = pendingPreviewWanted
         // Ownership of the session (and its socket) is now the service's.
         StreamingSession.clear()
 
@@ -298,19 +319,42 @@ class StreamingService : LifecycleService() {
     }
 
     private fun bindCamera(provider: ProcessCameraProvider) {
-        val previewUseCase = Preview.Builder().build()
-        preview = previewUseCase
         val analysis = buildAnalysis()
         // Seed the freshly-bound analyzer with the current device orientation so the first
         // frames (and any post-flip frames) are already upright before the sensor next fires.
         analysis.targetRotation = deviceOrientationToSurfaceRotation(deviceOrientation)
         imageAnalysis = analysis
         provider.unbindAll()
+        preview = null
         try {
-            provider.bindToLifecycle(this, cameraSelector, previewUseCase, analysis)
+            if (previewWanted) {
+                val previewUseCase = Preview.Builder().build()
+                preview = previewUseCase
+                provider.bindToLifecycle(this, cameraSelector, previewUseCase, analysis)
+            } else {
+                provider.bindToLifecycle(this, cameraSelector, analysis)
+            }
         } catch (e: Exception) {
             stopStreaming(error = e.localizedMessage ?: e.toString())
         }
+    }
+
+    private fun enablePreviewUseCase(provider: ProcessCameraProvider) {
+        if (preview != null) return
+        val previewUseCase = Preview.Builder().build()
+        try {
+            provider.bindToLifecycle(this, cameraSelector, previewUseCase)
+            preview = previewUseCase
+        } catch (_: Exception) {
+            preview = null
+        }
+    }
+
+    private fun disablePreviewUseCase(provider: ProcessCameraProvider) {
+        val existing = preview ?: return
+        existing.surfaceProvider = null
+        provider.unbind(existing)
+        preview = null
     }
 
     private fun buildAnalysis(): ImageAnalysis {
@@ -489,6 +533,10 @@ class StreamingService : LifecycleService() {
         @Volatile
         var isRunning = false
             private set
+
+        /** Read once at [startStreaming] so the first bind can skip the viewfinder. */
+        @Volatile
+        var pendingPreviewWanted = true
 
         private const val CHANNEL_ID = "phonecam_streaming"
         private const val NOTIFICATION_ID = 1

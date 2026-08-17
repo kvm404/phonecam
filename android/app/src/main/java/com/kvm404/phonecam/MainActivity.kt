@@ -143,6 +143,9 @@ class MainActivity : AppCompatActivity() {
     @Volatile
     private var leaveRequested = false
 
+    /** Local viewfinder only. The laptop stream is independent of this flag. */
+    private var previewVisible = true
+
     private var previewAspectWidth = 16
     private var previewAspectHeight = 9
 
@@ -309,10 +312,12 @@ class MainActivity : AppCompatActivity() {
             streamingService?.flipCamera()
             attachPreviewIfLive()
         }
+        binding.previewToggleButton.setOnClickListener { togglePreviewVisible() }
         binding.previewCard.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
             if (right - left != oldRight - oldLeft) applyPreviewAspect()
         }
         setupQualitySelector()
+        previewVisible = prefs().getBoolean(PREF_PREVIEW_VISIBLE, true)
     }
 
     /**
@@ -624,6 +629,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (bound || StreamingService.isRunning) return
 
+        StreamingService.pendingPreviewWanted = previewVisible
         StreamingSession.payload = current
         StreamingSession.profile = profile
         StreamingSession.rtpIdentity = rtp
@@ -679,7 +685,6 @@ class MainActivity : AppCompatActivity() {
         if (screenState != ScreenState.LIVE) return
         val streaming = isStreaming()
         val profile = streamingService?.profile() ?: committedProfile ?: selectedQuality.toProfile()
-        binding.previewCard.visibility = View.VISIBLE
         binding.leaveButton.visibility = View.VISIBLE
         binding.liveQualityCaption.visibility = View.VISIBLE
         binding.liveQualityCaption.text = getString(
@@ -694,8 +699,9 @@ class MainActivity : AppCompatActivity() {
             binding.liveRecBadge.visibility = View.VISIBLE
             binding.liveConnectingProgress.visibility = View.GONE
             binding.flipCameraButton.visibility = View.VISIBLE
+            binding.previewToggleButton.visibility = View.VISIBLE
             binding.leaveButton.setText(R.string.btn_leave)
-            attachPreviewIfLive()
+            applyPreviewVisibility()
             updateBatteryHint()
         } else {
             val name = payload?.name.orEmpty()
@@ -703,8 +709,39 @@ class MainActivity : AppCompatActivity() {
             binding.liveRecBadge.visibility = View.GONE
             binding.liveConnectingProgress.visibility = View.VISIBLE
             binding.flipCameraButton.visibility = View.GONE
+            binding.previewToggleButton.visibility = View.GONE
             binding.leaveButton.setText(R.string.btn_cancel)
             binding.liveBatteryHint.visibility = View.GONE
+            binding.previewCard.visibility = View.VISIBLE
+            binding.previewHiddenHint.visibility = View.GONE
+        }
+    }
+
+    private fun togglePreviewVisible() {
+        previewVisible = !previewVisible
+        prefs().edit().putBoolean(PREF_PREVIEW_VISIBLE, previewVisible).apply()
+        applyPreviewVisibility()
+    }
+
+    private fun applyPreviewVisibility() {
+        if (screenState != ScreenState.LIVE) return
+        binding.previewCard.visibility = if (previewVisible) View.VISIBLE else View.GONE
+        binding.previewHiddenHint.visibility = if (previewVisible) View.GONE else View.VISIBLE
+        if (previewVisible) {
+            binding.previewToggleButton.setText(R.string.btn_hide_preview)
+            binding.previewToggleButton.setIconResource(R.drawable.ic_preview_hide)
+            if (isStreaming()) {
+                streamingService?.setPreviewWanted(true)
+                attachPreviewIfLive()
+            }
+            sizePreviewCard(
+                streamingService?.profile()?.width ?: committedProfile?.width ?: selectedQuality.width,
+                streamingService?.profile()?.height ?: committedProfile?.height ?: selectedQuality.height,
+            )
+        } else {
+            binding.previewToggleButton.setText(R.string.btn_show_preview)
+            binding.previewToggleButton.setIconResource(R.drawable.ic_preview_show)
+            streamingService?.setPreviewWanted(false)
         }
     }
 
@@ -717,7 +754,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Attach the live preview to the service's Preview use case while visible + streaming. */
     private fun attachPreviewIfLive() {
-        if (screenState == ScreenState.LIVE && isStreaming()) {
+        if (screenState == ScreenState.LIVE && isStreaming() && previewVisible) {
             streamingService?.attachPreview(binding.livePreview.surfaceProvider)
         }
     }
@@ -804,5 +841,9 @@ class MainActivity : AppCompatActivity() {
         barcodeScanner.close()
         // Close a not-yet-handed-off RTP socket, if any (pairing was still in flight).
         rtpIdentity?.close()
+    }
+
+    private companion object {
+        const val PREF_PREVIEW_VISIBLE = "preview_visible"
     }
 }

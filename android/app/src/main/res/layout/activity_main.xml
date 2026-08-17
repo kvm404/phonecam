@@ -311,6 +311,15 @@
                         android:src="@drawable/ic_viewfinder" />
                 </FrameLayout>
             </com.google.android.material.card.MaterialCardView>
+
+            <TextView
+                android:id="@+id/previewHiddenHint"
+                style="@style/Widget.PhoneCam.ChipHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="@string/preview_hidden_hint"
+                android:visibility="gone" />
         </FrameLayout>
 
         <TextView
@@ -341,10 +350,21 @@
             android:layout_weight="1" />
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/previewToggleButton"
+            style="@style/Widget.PhoneCam.Button.Outlined"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_hide_preview"
+            android:visibility="gone"
+            app:icon="@drawable/ic_preview_hide"
+            tools:visibility="visible" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/flipCameraButton"
             style="@style/Widget.PhoneCam.Button.Outlined"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
             android:text="@string/btn_flip_camera"
             android:visibility="gone"
             app:icon="@drawable/ic_flip"

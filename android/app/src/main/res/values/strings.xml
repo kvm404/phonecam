@@ -29,6 +29,9 @@
     <string name="live_badge">Live</string>
     <string name="live_quality_caption">%1$dp · %2$d</string>
     <string name="btn_flip_camera">Flip</string>
+    <string name="btn_hide_preview">Hide preview</string>
+    <string name="btn_show_preview">Show preview</string>
+    <string name="preview_hidden_hint">Preview hidden. Still streaming.</string>
     <string name="btn_leave">Leave</string>
 
     <string name="preview_content_description">Camera preview</string>
