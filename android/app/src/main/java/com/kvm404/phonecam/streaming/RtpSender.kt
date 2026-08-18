@@ -9,8 +9,11 @@ import java.net.InetSocketAddress
  * output path can be exercised against a fake in tests.
  */
 interface RtpSender {
-    /** Send each packet in order. May throw on I/O failure. */
+    /** Send each packet in order. Implementations must not throw on I/O failure. */
     fun send(packets: List<ByteArray>)
+
+    /** Count of failed datagrams since construction; default senders report 0. */
+    fun sendFailures(): Int = 0
 }
 
 /**
@@ -28,16 +31,41 @@ interface RtpSender {
  * @param target the receiver's RTP host:port from the pairing payload.
  */
 class UdpRtpSender(
-    private val socket: DatagramSocket,
-    private val target: InetSocketAddress,
+    socket: DatagramSocket,
+    target: InetSocketAddress,
     private val pauseNanos: Long = PACING_PAUSE_NANOS,
 ) : RtpSender {
+    private var socket = socket
+    private var target = target
+
+    @Volatile
+    private var failures = 0
+
+    @Synchronized
+    fun setSocket(socket: DatagramSocket) {
+        this.socket = socket
+    }
+
+    @Synchronized
+    fun setTarget(target: InetSocketAddress) {
+        this.target = target
+    }
+
+    override fun sendFailures(): Int = failures
+
+    @Synchronized
     override fun send(packets: List<ByteArray>) {
+        val sock = socket
+        val dest = target
         for ((index, packet) in packets.withIndex()) {
             if (index != 0 && index % PACING_BURST == 0 && pauseNanos > 0) {
                 java.util.concurrent.locks.LockSupport.parkNanos(pauseNanos)
             }
-            socket.send(DatagramPacket(packet, packet.size, target))
+            try {
+                sock.send(DatagramPacket(packet, packet.size, dest))
+            } catch (_: Exception) {
+                failures++
+            }
         }
     }
 

@@ -53,6 +53,12 @@ class RtpPacketizer(
         }
     }
 
+    /** Copy cached SPS/PPS onto this packetizer (used when SSRC/seq are replaced). */
+    fun copyParameterSetsFrom(source: RtpPacketizer) {
+        cachedSps = source.cachedSps?.copyOf()
+        cachedPps = source.cachedPps?.copyOf()
+    }
+
     /**
      * Packetize one access unit into RTP packets.
      *

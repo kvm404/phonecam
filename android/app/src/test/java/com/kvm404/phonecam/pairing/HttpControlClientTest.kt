@@ -234,6 +234,21 @@ class HttpControlClientTest {
     }
 
     @Test
+    fun `status parses last_rtp_ms and request_keyframe`() {
+        val srv = TestHttpServer { _, _, _ ->
+            200 to """{"ok":true,"approved":true,"session":"sess-123","last_rtp_ms":42,"request_keyframe":true}"""
+        }
+        server = srv
+
+        val result = client(srv).status(payload)
+        assertTrue(result is StatusResult.Ok)
+        result as StatusResult.Ok
+        assertEquals(true, result.approved)
+        assertEquals(42L, result.lastRtpMs)
+        assertEquals(true, result.requestKeyframe)
+    }
+
+    @Test
     fun `status reflects approval flip`() {
         val approved = java.util.concurrent.atomic.AtomicBoolean(false)
         val srv = TestHttpServer { _, _, _ ->

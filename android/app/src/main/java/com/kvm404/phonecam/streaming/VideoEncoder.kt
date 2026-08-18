@@ -5,6 +5,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Bundle
+import com.kvm404.phonecam.pairing.RtpIdentity
 import com.kvm404.phonecam.pairing.VideoProfile
 
 /**
@@ -23,11 +24,13 @@ import com.kvm404.phonecam.pairing.VideoProfile
  */
 class VideoEncoder(
     private val profile: VideoProfile,
-    private val packetizer: RtpPacketizer,
+    packetizer: RtpPacketizer,
     private val sender: RtpSender,
     bitRate: Int = BitrateController.targetFor(profile.width, profile.height, profile.fps),
     private val onError: (Throwable) -> Unit,
 ) {
+    private var packetizer = packetizer
+    private val rtpLock = Any()
     private var codec: MediaCodec? = null
     private var outputThread: Thread? = null
 
@@ -238,6 +241,25 @@ class VideoEncoder(
         synchronized(lock) { bitrateController.noteRequestKeyframe() }
     }
 
+    /**
+     * Swap SSRC / sequence after a socket recreate. Codec and canvas stay up.
+     * Copies the SPS/PPS cache — MediaCodec will not emit another codec-config
+     * on [requestSyncFrame], and a fresh packetizer would send a naked IDR.
+     */
+    fun replaceRtpIdentity(id: RtpIdentity) {
+        val next = RtpPacketizer(id.ssrc, RtpPacketizer.randomInitialSequenceNumber())
+        synchronized(rtpLock) {
+            next.copyParameterSetsFrom(packetizer)
+            packetizer = next
+        }
+        requestSyncFrame()
+    }
+
+    fun sendFailures(): Int = sender.sendFailures()
+
+    internal fun packetizeAccessUnit(annexB: ByteArray, timestamp90k: Long): List<ByteArray> =
+        synchronized(rtpLock) { packetizer.packetize(annexB, timestamp90k) }
+
     /** Apply pending bitrate / sync only after a frame was queued. */
     private fun applyPendingParameters(c: MediaCodec) {
         val bitrate: Int?
@@ -322,10 +344,15 @@ class VideoEncoder(
                     buffer.get(data, 0, info.size)
 
                     if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                        packetizer.cacheParameterSets(data)
+                        synchronized(rtpLock) { packetizer.cacheParameterSets(data) }
                     } else {
                         val rtpTimestamp = info.presentationTimeUs * 90 / 1000
-                        sender.send(packetizer.packetize(data, rtpTimestamp))
+                        val packets = packetizeAccessUnit(data, rtpTimestamp)
+                        try {
+                            sender.send(packets)
+                        } catch (_: Throwable) {
+                            // send() must not tear down the encoder on UDP loss
+                        }
                     }
                 }
                 c.releaseOutputBuffer(index, false)

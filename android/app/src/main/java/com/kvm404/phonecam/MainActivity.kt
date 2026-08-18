@@ -50,6 +50,7 @@ import com.kvm404.phonecam.pairing.PairingPayload
 import com.kvm404.phonecam.pairing.PairingState
 import com.kvm404.phonecam.pairing.PhoneIdentity
 import com.kvm404.phonecam.pairing.RtpIdentity
+import com.kvm404.phonecam.pairing.StreamHealth
 import com.kvm404.phonecam.pairing.StreamQuality
 import com.kvm404.phonecam.pairing.VideoProfile
 import kotlinx.coroutines.Dispatchers
@@ -192,6 +193,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 teardownToHome(status)
             }
+        }
+
+        override fun onStreamHealth(health: StreamHealth) {
+            runOnUiThread { updateLiveUi() }
         }
     }
 
@@ -675,6 +680,7 @@ class MainActivity : AppCompatActivity() {
         StreamingSession.rtpIdentity = rtp
         StreamingSession.resumeToken = paired.resumeToken
         StreamingSession.pairingSecret = paired.pairingSecret
+        StreamingSession.phone = phoneIdentity
         rtpIdentity = null // ownership (and the open socket) transfers to the service
 
         keepScreenOn(true)
@@ -735,7 +741,20 @@ class MainActivity : AppCompatActivity() {
             profile.fps,
         )
         sizePreviewCard(profile.width, profile.height)
-        if (streaming) {
+        val reconnecting = streaming &&
+            streamingService?.streamHealth() is StreamHealth.Reconnecting
+        if (streaming && reconnecting) {
+            val name = streamingService?.laptopName() ?: payload?.name.orEmpty()
+            binding.liveStatus.text = getString(R.string.live_reconnecting, name)
+            binding.liveRecBadge.visibility = View.GONE
+            binding.liveConnectingProgress.visibility = View.VISIBLE
+            binding.flipCameraButton.visibility = View.VISIBLE
+            binding.previewToggleButton.visibility = View.VISIBLE
+            binding.leaveButton.visibility = View.VISIBLE
+            binding.leaveButton.setText(R.string.btn_leave)
+            applyPreviewVisibility()
+            updateBatteryHint()
+        } else if (streaming) {
             val name = streamingService?.laptopName() ?: payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_status, name)
             binding.liveRecBadge.visibility = View.VISIBLE

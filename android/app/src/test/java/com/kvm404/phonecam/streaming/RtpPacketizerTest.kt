@@ -172,6 +172,20 @@ class RtpPacketizerTest {
     }
 
     @Test
+    fun `copyParameterSetsFrom keeps SPS PPS on a new SSRC packetizer`() {
+        val source = packetizer()
+        source.cacheParameterSets(annexB4(0x67, 0x01, 0x02) + annexB4(0x68, 0x03))
+        val dest = RtpPacketizer(0xAABBCCDDL, initialSeq)
+        dest.copyParameterSetsFrom(source)
+        val packets = dest.packetize(annexB4(0x65, 0xAA), 50L)
+        assertEquals(3, packets.size)
+        assertEquals(7, packets[0][12].toInt() and 0x1F)
+        assertEquals(8, packets[1][12].toInt() and 0x1F)
+        assertEquals(5, packets[2][12].toInt() and 0x1F)
+        assertEquals(0xAABBCCDDL, ssrcOf(packets[0]))
+    }
+
+    @Test
     fun `config buffer caches parameter sets without emitting`() {
         val p = packetizer()
         val sps = intArrayOf(0x67, 0x01, 0x02)

@@ -26,6 +26,7 @@
 
     <!-- Live screen -->
     <string name="live_connecting">Connecting to %1$s…</string>
+    <string name="live_reconnecting">Reconnecting to %1$s…</string>
     <string name="live_status">%1$s</string>
     <string name="live_badge">Live</string>
     <string name="live_quality_caption">%1$dp · %2$d</string>
