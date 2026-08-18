@@ -19,6 +19,7 @@ import android.os.PowerManager
 import android.util.Log
 import android.util.Size
 import android.view.OrientationEventListener
+import android.widget.Toast
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
@@ -30,6 +31,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
+import com.kvm404.phonecam.pairing.CameraFacing
 import com.kvm404.phonecam.pairing.HttpControlClient
 import com.kvm404.phonecam.pairing.PairingPayload
 import com.kvm404.phonecam.pairing.PhoneIdentity
@@ -160,6 +162,12 @@ class StreamingService : LifecycleService() {
 
         /** In-session reconnect health. Default no-op for callers that only watch start/stop. */
         fun onStreamHealth(health: StreamHealth) {}
+
+        /** Provider/bind settled so the activity can show or hide Flip. */
+        fun onCameraReady() {}
+
+        /** Flip or first-bind facing was unavailable; the previous lens is still live. */
+        fun onNoOtherCamera() {}
     }
 
     inner class LocalBinder : Binder() {
@@ -240,6 +248,10 @@ class StreamingService : LifecycleService() {
 
     @Volatile
     private var streaming = false
+
+    /** First-bind fell back; publish cameraLabel() once reconnectController exists. */
+    @Volatile
+    private var reportCameraAfterRecovery = false
 
     // ------------------------------------------------------------------ Service lifecycle
 
@@ -323,13 +335,22 @@ class StreamingService : LifecycleService() {
         }
     }
 
-    fun flipCamera() {
-        cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            CameraSelector.DEFAULT_BACK_CAMERA
+    fun canFlipCamera(): Boolean {
+        val provider = cameraProvider ?: return false
+        return try {
+            // Flip binds DEFAULT_BACK/FRONT; extra BACK or EXTERNAL infos do not count.
+            provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) &&
+                provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)
+        } catch (_: Exception) {
+            false
         }
-        if (streaming) bindCamera()
+    }
+
+    fun flipCamera() {
+        if (!streaming) return
+        val previous = cameraSelector
+        cameraSelector = oppositeSelector(previous)
+        bindCamera(isFlip = true, previous = previous)
     }
 
     /** User-initiated stop (Leave button). Tears down and removes the service. */
@@ -384,6 +405,7 @@ class StreamingService : LifecycleService() {
 
         acquireLocks()
         startOrientationTracking()
+        applyPersistedFacing()
         streaming = true
         bindCamera()
         startSessionRecovery(current, committed, handoff)
@@ -417,6 +439,7 @@ class StreamingService : LifecycleService() {
         watchdogJob = null
         healthJob = null
         reconnectController = null
+        reportCameraAfterRecovery = false
         unregisterWifiCallback()
         stopOrientationTracking()
         orientationListener = null
@@ -432,10 +455,10 @@ class StreamingService : LifecycleService() {
         rtpIdentity = null
     }
 
-    private fun bindCamera() {
+    private fun bindCamera(isFlip: Boolean = false, previous: CameraSelector? = null) {
         val provider = cameraProvider
         if (provider != null) {
-            bindCamera(provider)
+            bindCamera(provider, isFlip, previous)
             return
         }
         val future = ProcessCameraProvider.getInstance(this)
@@ -443,14 +466,79 @@ class StreamingService : LifecycleService() {
             try {
                 val resolved = future.get()
                 cameraProvider = resolved
-                if (streaming) bindCamera(resolved)
+                if (streaming) bindCamera(resolved, isFlip, previous)
             } catch (e: Exception) {
                 stopStreaming(error = e.localizedMessage ?: e.toString())
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun bindCamera(provider: ProcessCameraProvider) {
+    private fun bindCamera(
+        provider: ProcessCameraProvider,
+        isFlip: Boolean,
+        previous: CameraSelector?,
+    ) {
+        val requested = cameraSelector
+        // Probe before unbindAll so a missing opposite lens cannot tear down a live bind.
+        if (!providerHasCamera(provider, requested)) {
+            if (isFlip) {
+                cameraSelector = previous ?: oppositeSelector(requested)
+                notifyNoOtherCamera()
+                callback?.onCameraReady()
+                return
+            }
+            val fallback = oppositeSelector(requested)
+            if (!providerHasCamera(provider, fallback)) {
+                stopStreaming(error = "no camera available")
+                return
+            }
+            cameraSelector = fallback
+            try {
+                bindUseCasesAfterUnbind(provider, fallback)
+            } catch (e: Exception) {
+                stopStreaming(error = e.localizedMessage ?: e.toString())
+                return
+            }
+            persistFacing()
+            notifyNoOtherCamera()
+            callback?.onCameraReady()
+            scheduleBoundCameraReport()
+            return
+        }
+        try {
+            bindUseCasesAfterUnbind(provider, requested)
+            if (isFlip) persistFacing()
+            callback?.onCameraReady()
+        } catch (e: Exception) {
+            if (isFlip) {
+                cameraSelector = previous ?: oppositeSelector(requested)
+                try {
+                    bindUseCasesAfterUnbind(provider, cameraSelector)
+                } catch (rebind: Exception) {
+                    stopStreaming(error = rebind.localizedMessage ?: rebind.toString())
+                    return
+                }
+                notifyNoOtherCamera()
+                callback?.onCameraReady()
+                return
+            }
+            stopStreaming(error = e.localizedMessage ?: e.toString())
+        }
+    }
+
+    private fun providerHasCamera(
+        provider: ProcessCameraProvider,
+        selector: CameraSelector,
+    ): Boolean = try {
+        provider.hasCamera(selector)
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun bindUseCasesAfterUnbind(
+        provider: ProcessCameraProvider,
+        selector: CameraSelector,
+    ) {
         val analysis = buildAnalysis()
         // Seed the freshly-bound analyzer with the current device orientation so the first
         // frames (and any post-flip frames) are already upright before the sensor next fires.
@@ -458,16 +546,21 @@ class StreamingService : LifecycleService() {
         imageAnalysis = analysis
         provider.unbindAll()
         preview = null
-        try {
-            if (previewWanted) {
-                val previewUseCase = Preview.Builder().build()
-                preview = previewUseCase
-                provider.bindToLifecycle(this, cameraSelector, previewUseCase, analysis)
-            } else {
-                provider.bindToLifecycle(this, cameraSelector, analysis)
-            }
-        } catch (e: Exception) {
-            stopStreaming(error = e.localizedMessage ?: e.toString())
+        bindUseCases(provider, selector, analysis)
+    }
+
+    private fun bindUseCases(
+        provider: ProcessCameraProvider,
+        selector: CameraSelector,
+        analysis: ImageAnalysis,
+    ) {
+        if (previewWanted) {
+            val previewUseCase = Preview.Builder().build()
+            preview = previewUseCase
+            provider.bindToLifecycle(this, selector, previewUseCase, analysis)
+        } else {
+            preview = null
+            provider.bindToLifecycle(this, selector, analysis)
         }
     }
 
@@ -595,6 +688,7 @@ class StreamingService : LifecycleService() {
                 if (streaming) pollLaptopStatus()
             }
         }
+        publishBoundCamera()
     }
 
     private fun startReconnect(reason: String) {
@@ -692,7 +786,66 @@ class StreamingService : LifecycleService() {
     }
 
     private fun cameraLabel(): String =
-        if (cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) "front" else "back"
+        if (cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) {
+            CameraFacing.FRONT
+        } else {
+            CameraFacing.BACK
+        }
+
+    private fun scheduleBoundCameraReport() {
+        reportCameraAfterRecovery = true
+        publishBoundCamera()
+    }
+
+    /**
+     * One-shot /reconnect with the live RTP pin so /status camera matches a
+     * first-bind fallback. Same port/SSRC and canvas: the laptop does not
+     * restart gst. A later in-session reconnect already sends [cameraLabel].
+     */
+    private fun publishBoundCamera() {
+        if (!reportCameraAfterRecovery || !streaming) return
+        val controller = reconnectController ?: return
+        val identity = rtpIdentity ?: return
+        reportCameraAfterRecovery = false
+        val endpoint = RtpEndpoint(identity.sourcePort, identity.ssrc)
+        Log.i(TAG, "report bound camera=${cameraLabel()}")
+        serviceScope.launch(Dispatchers.IO) {
+            controller.reportCamera(endpoint)
+        }
+    }
+
+    private fun applyPersistedFacing() {
+        cameraSelector = if (
+            CameraFacing.fromPref(prefs().getString(CameraFacing.PREF_KEY, null)) == CameraFacing.FRONT
+        ) {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
+    }
+
+    private fun persistFacing() {
+        prefs().edit().putString(CameraFacing.PREF_KEY, cameraLabel()).apply()
+    }
+
+    private fun prefs() = getSharedPreferences("phonecam", Context.MODE_PRIVATE)
+
+    private fun oppositeSelector(current: CameraSelector): CameraSelector =
+        if (current == CameraSelector.DEFAULT_FRONT_CAMERA) {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        } else {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        }
+
+    private fun notifyNoOtherCamera() {
+        Log.i(TAG, "no other camera")
+        val cb = callback
+        if (cb != null) {
+            cb.onNoOtherCamera()
+        } else {
+            Toast.makeText(this, R.string.no_other_camera, Toast.LENGTH_SHORT).show()
+        }
+    }
 
     private fun registerWifiCallback() {
         if (wifiCallbackRegistered) return

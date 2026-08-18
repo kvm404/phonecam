@@ -106,32 +106,9 @@ class ReconnectController(
                 continue
             }
 
-            val request = ReconnectRequest(
-                payload = creds.payload,
-                phone = creds.phone,
-                rtpPort = identity.port,
-                ssrc = identity.ssrc,
-                video = creds.profile,
-                resumeToken = creds.resumeToken,
-                pairingSecret = creds.pairingSecret,
-                camera = camera(),
-            )
-
-            when (val result = try {
-                client.reconnect(request)
-            } catch (t: Exception) {
-                ReconnectResult.Failure(t.message ?: "reconnect failed")
-            }) {
+            when (val result = postReconnect(identity)) {
                 is ReconnectResult.Ok -> {
-                    if (result.resumeToken.isNotBlank()) {
-                        creds = creds.copy(resumeToken = result.resumeToken)
-                    }
-                    if (result.session.isNotBlank()) {
-                        creds = creds.copy(
-                            payload = creds.payload.copy(session = result.session),
-                        )
-                    }
-                    onSuccess(result, identity)
+                    acceptOk(result, identity)
                     _health.value = StreamHealth.Live
                     return
                 }
@@ -143,6 +120,55 @@ class ReconnectController(
                 }
             }
         }
+    }
+
+    /**
+     * POST /reconnect once with [identity] so /status camera matches a
+     * first-bind fallback. Does not recreate RTP, does not enter
+     * Reconnecting, and does not give up. No-op while a loop is running
+     * or after Failed — that loop already sends [camera].
+     */
+    fun reportCamera(identity: RtpEndpoint) {
+        if (cancelled || _health.value !is StreamHealth.Live) return
+        if (!inFlight.compareAndSet(false, true)) return
+        try {
+            when (val result = postReconnect(identity)) {
+                is ReconnectResult.Ok -> acceptOk(result, identity)
+                is ReconnectResult.Failure -> Unit
+            }
+        } finally {
+            inFlight.set(false)
+        }
+    }
+
+    private fun postReconnect(identity: RtpEndpoint): ReconnectResult {
+        val request = ReconnectRequest(
+            payload = creds.payload,
+            phone = creds.phone,
+            rtpPort = identity.port,
+            ssrc = identity.ssrc,
+            video = creds.profile,
+            resumeToken = creds.resumeToken,
+            pairingSecret = creds.pairingSecret,
+            camera = camera(),
+        )
+        return try {
+            client.reconnect(request)
+        } catch (t: Exception) {
+            ReconnectResult.Failure(t.message ?: "reconnect failed")
+        }
+    }
+
+    private fun acceptOk(result: ReconnectResult.Ok, identity: RtpEndpoint) {
+        if (result.resumeToken.isNotBlank()) {
+            creds = creds.copy(resumeToken = result.resumeToken)
+        }
+        if (result.session.isNotBlank()) {
+            creds = creds.copy(
+                payload = creds.payload.copy(session = result.session),
+            )
+        }
+        onSuccess(result, identity)
     }
 
     /**

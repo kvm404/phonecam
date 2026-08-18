@@ -184,6 +184,32 @@ class HttpControlClientTest {
         assertEquals(1280, video.getInt("width"))
         assertEquals(720, video.getInt("height"))
         assertEquals(30, video.getInt("fps"))
+        assertTrue(!body.has("camera"))
+    }
+
+    @Test
+    fun `pair body carries optional camera`() {
+        var captured: String? = null
+        val srv = TestHttpServer { _, path, body ->
+            if (path == "/pair") {
+                captured = body
+                202 to """{"ok":true,"approved":false,"session":"sess-123"}"""
+            } else {
+                404 to """{"error":"not found"}"""
+            }
+        }
+        server = srv
+
+        client(srv).pair(
+            payload,
+            phone,
+            rtpPort = 40000,
+            ssrc = 42L,
+            video = VideoProfile(1280, 720, 30),
+            camera = "front",
+        )
+
+        assertEquals("front", JSONObject(requireNotNull(captured)).getString("camera"))
     }
 
     @Test
