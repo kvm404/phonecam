@@ -7,11 +7,16 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import android.util.Size
 import android.view.OrientationEventListener
 import androidx.camera.core.CameraSelector
@@ -25,8 +30,16 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
+import com.kvm404.phonecam.pairing.HttpControlClient
 import com.kvm404.phonecam.pairing.PairingPayload
+import com.kvm404.phonecam.pairing.PhoneIdentity
+import com.kvm404.phonecam.pairing.ReconnectController
+import com.kvm404.phonecam.pairing.ReconnectResult
+import com.kvm404.phonecam.pairing.RtpEndpoint
 import com.kvm404.phonecam.pairing.RtpIdentity
+import com.kvm404.phonecam.pairing.SessionCredentials
+import com.kvm404.phonecam.pairing.StatusResult
+import com.kvm404.phonecam.pairing.StreamHealth
 import com.kvm404.phonecam.pairing.VideoProfile
 import com.kvm404.phonecam.pairing.deviceOrientationToSurfaceRotation
 import com.kvm404.phonecam.pairing.quantizeOrientation
@@ -37,7 +50,17 @@ import com.kvm404.phonecam.streaming.RtpPacketizer
 import com.kvm404.phonecam.streaming.UdpRtpSender
 import com.kvm404.phonecam.streaming.VideoEncoder
 import java.net.InetSocketAddress
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
  * In-process handoff of the session from the pairing activity to the streaming service.
@@ -53,6 +76,7 @@ object StreamingSession {
     @Volatile var profile: VideoProfile? = null
     @Volatile var resumeToken: String? = null
     @Volatile var pairingSecret: String? = null
+    @Volatile var phone: PhoneIdentity? = null
 
     data class Handoff(
         val payload: PairingPayload,
@@ -60,6 +84,7 @@ object StreamingSession {
         val rtpIdentity: RtpIdentity,
         val resumeToken: String?,
         val pairingSecret: String?,
+        val phone: PhoneIdentity?,
     )
 
     @Synchronized
@@ -69,12 +94,17 @@ object StreamingSession {
         val currentRtp = rtpIdentity ?: return null
         val currentResume = resumeToken
         val currentSecret = pairingSecret
+        val currentPhone = phone
         payload = null
         profile = null
         rtpIdentity = null
         resumeToken = null
         pairingSecret = null
-        return Handoff(currentPayload, currentProfile, currentRtp, currentResume, currentSecret)
+        phone = null
+        return Handoff(
+            currentPayload, currentProfile, currentRtp,
+            currentResume, currentSecret, currentPhone,
+        )
     }
 
     @Synchronized
@@ -85,6 +115,7 @@ object StreamingSession {
         profile = null
         resumeToken = null
         pairingSecret = null
+        phone = null
     }
 
     @Synchronized
@@ -94,6 +125,7 @@ object StreamingSession {
         profile = null
         resumeToken = null
         pairingSecret = null
+        phone = null
     }
 }
 
@@ -112,7 +144,8 @@ object StreamingSession {
  * The activity binds via [LocalBinder] to attach/detach its live preview, flip the camera,
  * stop the stream, and observe start/stop through a [Callback]. Streaming is unaffected by
  * the activity binding, unbinding, or being destroyed; it stops only on the Leave button,
- * the notification Stop action, or an encoder/camera error.
+ * the notification Stop action, an encoder/camera error, or a 60 s reconnect give-up.
+ * Send errors and brief Wi-Fi loss do not stop it.
  */
 @ExperimentalGetImage
 class StreamingService : LifecycleService() {
@@ -124,6 +157,9 @@ class StreamingService : LifecycleService() {
 
         /** Streaming ended. [error] is non-null on an encoder/camera failure. */
         fun onStreamingStopped(error: String?)
+
+        /** In-session reconnect health. Default no-op for callers that only watch start/stop. */
+        fun onStreamHealth(health: StreamHealth) {}
     }
 
     inner class LocalBinder : Binder() {
@@ -133,6 +169,12 @@ class StreamingService : LifecycleService() {
     private val binder = LocalBinder()
 
     private val analysisExecutor = Executors.newSingleThreadExecutor()
+    private val serviceJob = SupervisorJob()
+    private val serviceScope = CoroutineScope(serviceJob + Dispatchers.Main.immediate)
+    private val controlClient = HttpControlClient()
+    private val wifiUp = AtomicBoolean(true)
+    /** Matching Wi-Fi networks (not a last-writer flag). Empty means Wi-Fi is down. */
+    private val wifiNetworks = ConcurrentHashMap.newKeySet<Network>()
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var preview: Preview? = null
@@ -143,7 +185,35 @@ class StreamingService : LifecycleService() {
     private var rtpIdentity: RtpIdentity? = null
     private var resumeToken: String? = null
     private var pairingSecret: String? = null
+    private var phone: PhoneIdentity? = null
     private var videoEncoder: VideoEncoder? = null
+    private var rtpSender: UdpRtpSender? = null
+    private var reconnectController: ReconnectController? = null
+    private var watchdogJob: Job? = null
+    private var healthJob: Job? = null
+    @Volatile
+    private var lastSeenSendFailures = 0
+    private var wifiCallbackRegistered = false
+    private var wifiCallbackPrimed = false
+
+    private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val first = !wifiCallbackPrimed
+            wifiCallbackPrimed = true
+            wifiNetworks.add(network)
+            adoptLiveWifiNetworks()
+            Log.i(TAG, "wifi available")
+            if (!first) startReconnect("wifi available")
+        }
+
+        override fun onLost(network: Network) {
+            wifiCallbackPrimed = true
+            wifiNetworks.remove(network)
+            adoptLiveWifiNetworks(excluding = network)
+            Log.i(TAG, "wifi lost")
+            startReconnect("wifi lost")
+        }
+    }
 
     private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -198,6 +268,7 @@ class StreamingService : LifecycleService() {
     override fun onDestroy() {
         // Ensure everything is released even on an abrupt teardown.
         releasePipeline()
+        serviceJob.cancel()
         analysisExecutor.shutdown()
         isRunning = false
         super.onDestroy()
@@ -218,6 +289,9 @@ class StreamingService : LifecycleService() {
     }
 
     fun isStreaming(): Boolean = streaming
+
+    fun streamHealth(): StreamHealth =
+        reconnectController?.health?.value ?: StreamHealth.Live
 
     fun laptopName(): String? = payload?.name
 
@@ -280,18 +354,16 @@ class StreamingService : LifecycleService() {
         rtpIdentity = handoff.rtpIdentity
         resumeToken = handoff.resumeToken
         pairingSecret = handoff.pairingSecret
+        phone = handoff.phone
         previewWanted = pendingPreviewWanted
 
         startForegroundNotification(current.name)
 
         val target = InetSocketAddress(current.rtpHost, current.rtpPort)
         val sender = UdpRtpSender(socket, target)
+        rtpSender = sender
         val packetizer = RtpPacketizer(handoff.rtpIdentity.ssrc, RtpPacketizer.randomInitialSequenceNumber())
         val committed = handoff.profile
-        // Adaptation is drop-driven this PR. A later /status watchdog must call
-        // encoder.noteReceiverAge(last_rtp_ms) on every read, and
-        // encoder.noteRequestKeyframe() only when request_keyframe is set — never
-        // the keyframe hook alone.
         val encoder = VideoEncoder(
             committed,
             packetizer,
@@ -314,6 +386,7 @@ class StreamingService : LifecycleService() {
         startOrientationTracking()
         streaming = true
         bindCamera()
+        startSessionRecovery(current, committed, handoff)
         callback?.onStreamingStarted()
     }
 
@@ -338,6 +411,13 @@ class StreamingService : LifecycleService() {
     /** Release the camera, encoder, socket, locks and listener. Idempotent. */
     private fun releasePipeline() {
         streaming = false
+        reconnectController?.cancel()
+        watchdogJob?.cancel()
+        healthJob?.cancel()
+        watchdogJob = null
+        healthJob = null
+        reconnectController = null
+        unregisterWifiCallback()
         stopOrientationTracking()
         orientationListener = null
         imageAnalysis?.clearAnalyzer()
@@ -346,6 +426,7 @@ class StreamingService : LifecycleService() {
         cameraProvider?.unbindAll()
         videoEncoder?.stop()
         videoEncoder = null
+        rtpSender = null
         releaseLocks()
         rtpIdentity?.close()
         rtpIdentity = null
@@ -468,6 +549,208 @@ class StreamingService : LifecycleService() {
         } finally {
             imageProxy.close()
         }
+    }
+
+    // ------------------------------------------------------------------ In-session reconnect
+
+    private fun startSessionRecovery(
+        current: PairingPayload,
+        committed: VideoProfile,
+        handoff: StreamingSession.Handoff,
+    ) {
+        lastSeenSendFailures = 0
+        wifiNetworks.clear()
+        wifiCallbackPrimed = false
+        registerWifiCallback()
+        val identity = phone ?: handoff.phone
+        if (identity != null) {
+            val controller = ReconnectController(
+                client = controlClient,
+                creds = SessionCredentials(
+                    payload = current,
+                    resumeToken = handoff.resumeToken ?: resumeToken,
+                    pairingSecret = handoff.pairingSecret ?: pairingSecret,
+                    profile = committed,
+                    phone = identity,
+                ),
+                wifiAvailable = { wifiUp.get() },
+                resolveIdentity = { resolveRtpIdentity() },
+                camera = { cameraLabel() },
+                onSuccess = { result, _ -> applyReconnectSuccess(result) },
+            )
+            reconnectController = controller
+            healthJob = serviceScope.launch {
+                controller.health.collect { health ->
+                    callback?.onStreamHealth(health)
+                    if (health is StreamHealth.Failed && streaming) {
+                        Log.i(TAG, "reconnect gave up: ${health.message}")
+                        stopStreaming(health.message)
+                    }
+                }
+            }
+        }
+        watchdogJob = serviceScope.launch(Dispatchers.IO) {
+            while (isActive && streaming) {
+                delay(WATCHDOG_INTERVAL_MS)
+                if (streaming) pollLaptopStatus()
+            }
+        }
+    }
+
+    private fun startReconnect(reason: String) {
+        val controller = reconnectController ?: return
+        if (!streaming) return
+        if (controller.health.value is StreamHealth.Failed) return
+        Log.i(TAG, "reconnect start: $reason")
+        serviceScope.launch(Dispatchers.IO) {
+            controller.start()
+        }
+    }
+
+    /** New port/SSRC every attempt so RTP is not stuck on a socket bound to a dead iface. */
+    private fun resolveRtpIdentity(): RtpEndpoint {
+        val created = RtpIdentity.create()
+        val existing = rtpIdentity
+        created.socket?.let { rtpSender?.setSocket(it) }
+        videoEncoder?.replaceRtpIdentity(created)
+        rtpIdentity = created
+        if (existing != null && existing !== created) {
+            existing.close()
+        }
+        Log.i(TAG, "recreated rtp identity port=${created.sourcePort} ssrc=${created.ssrc}")
+        return RtpEndpoint(created.sourcePort, created.ssrc)
+    }
+
+    private fun applyReconnectSuccess(result: ReconnectResult.Ok) {
+        lastSeenSendFailures = videoEncoder?.sendFailures() ?: lastSeenSendFailures
+        val current = payload ?: return
+        var next = current
+        if (result.session.isNotBlank()) {
+            next = next.copy(session = result.session)
+        }
+        if (result.control.isNotBlank()) {
+            next = next.copy(control = result.control)
+        }
+        val rtpField = result.rtp
+        if (rtpField.isNotBlank()) {
+            val colon = rtpField.lastIndexOf(':')
+            val host = if (colon > 0) rtpField.substring(0, colon) else ""
+            val port = if (colon in 1 until rtpField.length - 1) {
+                rtpField.substring(colon + 1).toIntOrNull()
+            } else {
+                null
+            }
+            if (host.isNotBlank() && port != null && port in 1..65535) {
+                rtpSender?.setTarget(InetSocketAddress(host, port))
+                next = next.copy(rtp = rtpField, rtpHost = host, rtpPort = port)
+            }
+        }
+        payload = next
+        if (result.resumeToken.isNotBlank()) {
+            resumeToken = result.resumeToken
+        }
+        videoEncoder?.requestSyncFrame()
+        Log.i(TAG, "reconnect succeeded session=${next.session}")
+    }
+
+    private fun pollLaptopStatus() {
+        val current = payload ?: return
+        val encoder = videoEncoder
+        when (val result = controlClient.status(current)) {
+            is StatusResult.Failure -> {
+                Log.i(TAG, "watchdog: laptop unreachable: ${result.message}")
+                startReconnect("watchdog unreachable")
+            }
+            is StatusResult.Ok -> {
+                result.lastRtpMs?.let { encoder?.noteReceiverAge(it) }
+                if (result.requestKeyframe) {
+                    encoder?.requestSyncFrame()
+                    encoder?.noteRequestKeyframe()
+                }
+                if (ReconnectController.shouldStartOnStatus(
+                        reconnectController?.health?.value ?: StreamHealth.Live,
+                        result.approved,
+                        result.session,
+                        payload?.session,
+                    )
+                ) {
+                    Log.i(TAG, "watchdog: unapproved or session mismatch")
+                    startReconnect("status mismatch")
+                }
+            }
+        }
+        val failures = encoder?.sendFailures() ?: 0
+        if (ReconnectController.shouldStartOnSendFailures(
+                reconnectController?.health?.value ?: StreamHealth.Live,
+                failures,
+                lastSeenSendFailures,
+            )
+        ) {
+            lastSeenSendFailures = failures
+            startReconnect("send failures")
+        }
+    }
+
+    private fun cameraLabel(): String =
+        if (cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) "front" else "back"
+
+    private fun registerWifiCallback() {
+        if (wifiCallbackRegistered) return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        adoptLiveWifiNetworks(cm)
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
+        try {
+            cm.registerNetworkCallback(request, wifiCallback)
+            wifiCallbackRegistered = true
+        } catch (e: RuntimeException) {
+            Log.i(TAG, "wifi callback not registered: ${e.message}")
+            // Cannot observe Wi-Fi; keep the give-up window running.
+            wifiUp.set(true)
+        }
+    }
+
+    private fun unregisterWifiCallback() {
+        if (!wifiCallbackRegistered) return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        try {
+            cm.unregisterNetworkCallback(wifiCallback)
+        } catch (_: RuntimeException) {
+            // already unregistered
+        }
+        wifiCallbackRegistered = false
+        wifiCallbackPrimed = false
+        wifiNetworks.clear()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun adoptLiveWifiNetworks(
+        cm: ConnectivityManager? = null,
+        excluding: Network? = null,
+    ) {
+        val manager = cm
+            ?: getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (manager != null) {
+            try {
+                for (network in manager.allNetworks) {
+                    if (excluding != null && network == excluding) continue
+                    if (isMatchingWifi(manager, network)) {
+                        wifiNetworks.add(network)
+                    }
+                }
+            } catch (_: RuntimeException) {
+                // leave the callback-tracked set as-is
+            }
+        }
+        wifiUp.set(wifiNetworks.isNotEmpty())
+    }
+
+    private fun isMatchingWifi(cm: ConnectivityManager, network: Network): Boolean {
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
     }
 
     // ------------------------------------------------------------------ Orientation
@@ -599,5 +882,7 @@ class StreamingService : LifecycleService() {
 
         /** Safety valve so a wedged stream can never hold the CPU forever. */
         private const val WAKE_LOCK_TIMEOUT_MS = 12L * 60L * 60L * 1000L
+        private const val WATCHDOG_INTERVAL_MS = 2_000L
+        private const val TAG = "phonecam"
     }
 }

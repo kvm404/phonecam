@@ -34,6 +34,8 @@ sealed interface StatusResult {
         val session: String,
         val resumeToken: String? = null,
         val pairingSecret: String? = null,
+        val lastRtpMs: Long? = null,
+        val requestKeyframe: Boolean = false,
     ) : StatusResult
 
     data class Failure(val message: String) : StatusResult
@@ -150,6 +152,8 @@ class HttpControlClient(
                     session = json.optString("session", payload.session),
                     resumeToken = json.optNonBlank("resume_token"),
                     pairingSecret = json.optNonBlank("pairing_secret"),
+                    lastRtpMs = json.optLongOrNull("last_rtp_ms"),
+                    requestKeyframe = json.optBoolean("request_keyframe", false),
                 )
             } else {
                 StatusResult.Failure(errorMessage(code, responseBody))
@@ -261,3 +265,6 @@ class HttpControlClient(
 
 private fun JSONObject.optNonBlank(key: String): String? =
     optString(key).takeIf { it.isNotBlank() }
+
+private fun JSONObject.optLongOrNull(key: String): Long? =
+    if (has(key) && !isNull(key)) optLong(key) else null
