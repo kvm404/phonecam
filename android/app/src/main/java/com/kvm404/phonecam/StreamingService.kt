@@ -50,6 +50,7 @@ import com.kvm404.phonecam.streaming.RtpPacketizer
 import com.kvm404.phonecam.streaming.UdpRtpSender
 import com.kvm404.phonecam.streaming.VideoEncoder
 import java.net.InetSocketAddress
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -60,7 +61,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * In-process handoff of the session from the pairing activity to the streaming service.
@@ -173,6 +173,8 @@ class StreamingService : LifecycleService() {
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.Main.immediate)
     private val controlClient = HttpControlClient()
     private val wifiUp = AtomicBoolean(true)
+    /** Matching Wi-Fi networks (not a last-writer flag). Empty means Wi-Fi is down. */
+    private val wifiNetworks = ConcurrentHashMap.newKeySet<Network>()
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var preview: Preview? = null
@@ -189,6 +191,7 @@ class StreamingService : LifecycleService() {
     private var reconnectController: ReconnectController? = null
     private var watchdogJob: Job? = null
     private var healthJob: Job? = null
+    @Volatile
     private var lastSeenSendFailures = 0
     private var wifiCallbackRegistered = false
     private var wifiCallbackPrimed = false
@@ -197,14 +200,16 @@ class StreamingService : LifecycleService() {
         override fun onAvailable(network: Network) {
             val first = !wifiCallbackPrimed
             wifiCallbackPrimed = true
-            wifiUp.set(true)
+            wifiNetworks.add(network)
+            adoptLiveWifiNetworks()
             Log.i(TAG, "wifi available")
             if (!first) startReconnect("wifi available")
         }
 
         override fun onLost(network: Network) {
             wifiCallbackPrimed = true
-            wifiUp.set(false)
+            wifiNetworks.remove(network)
+            adoptLiveWifiNetworks(excluding = network)
             Log.i(TAG, "wifi lost")
             startReconnect("wifi lost")
         }
@@ -554,7 +559,7 @@ class StreamingService : LifecycleService() {
         handoff: StreamingSession.Handoff,
     ) {
         lastSeenSendFailures = 0
-        wifiUp.set(true)
+        wifiNetworks.clear()
         wifiCallbackPrimed = false
         registerWifiCallback()
         val identity = phone ?: handoff.phone
@@ -577,6 +582,10 @@ class StreamingService : LifecycleService() {
             healthJob = serviceScope.launch {
                 controller.health.collect { health ->
                     callback?.onStreamHealth(health)
+                    if (health is StreamHealth.Failed && streaming) {
+                        Log.i(TAG, "reconnect gave up: ${health.message}")
+                        stopStreaming(health.message)
+                    }
                 }
             }
         }
@@ -591,38 +600,29 @@ class StreamingService : LifecycleService() {
     private fun startReconnect(reason: String) {
         val controller = reconnectController ?: return
         if (!streaming) return
+        if (controller.health.value is StreamHealth.Failed) return
         Log.i(TAG, "reconnect start: $reason")
         serviceScope.launch(Dispatchers.IO) {
             controller.start()
-            val health = controller.health.value
-            if (health is StreamHealth.Failed && streaming) {
-                Log.i(TAG, "reconnect gave up: ${health.message}")
-                withContext(Dispatchers.Main) {
-                    stopStreaming(health.message)
-                }
-            }
         }
     }
 
+    /** New port/SSRC every attempt so RTP is not stuck on a socket bound to a dead iface. */
     private fun resolveRtpIdentity(): RtpEndpoint {
-        val existing = rtpIdentity
-        val socket = existing?.socket
-        if (existing != null && socket != null && !socket.isClosed) {
-            return RtpEndpoint(existing.sourcePort, existing.ssrc)
-        }
-        existing?.close()
         val created = RtpIdentity.create()
-        rtpIdentity = created
-        val newSocket = created.socket
-        if (newSocket != null) {
-            rtpSender?.setSocket(newSocket)
-        }
+        val existing = rtpIdentity
+        created.socket?.let { rtpSender?.setSocket(it) }
         videoEncoder?.replaceRtpIdentity(created)
+        rtpIdentity = created
+        if (existing != null && existing !== created) {
+            existing.close()
+        }
         Log.i(TAG, "recreated rtp identity port=${created.sourcePort} ssrc=${created.ssrc}")
         return RtpEndpoint(created.sourcePort, created.ssrc)
     }
 
     private fun applyReconnectSuccess(result: ReconnectResult.Ok) {
+        lastSeenSendFailures = videoEncoder?.sendFailures() ?: lastSeenSendFailures
         val current = payload ?: return
         var next = current
         if (result.session.isNotBlank()) {
@@ -667,8 +667,12 @@ class StreamingService : LifecycleService() {
                     encoder?.requestSyncFrame()
                     encoder?.noteRequestKeyframe()
                 }
-                if (!result.approved ||
-                    (result.session.isNotBlank() && result.session != current.session)
+                if (ReconnectController.shouldStartOnStatus(
+                        reconnectController?.health?.value ?: StreamHealth.Live,
+                        result.approved,
+                        result.session,
+                        payload?.session,
+                    )
                 ) {
                     Log.i(TAG, "watchdog: unapproved or session mismatch")
                     startReconnect("status mismatch")
@@ -676,7 +680,12 @@ class StreamingService : LifecycleService() {
             }
         }
         val failures = encoder?.sendFailures() ?: 0
-        if (failures > lastSeenSendFailures) {
+        if (ReconnectController.shouldStartOnSendFailures(
+                reconnectController?.health?.value ?: StreamHealth.Live,
+                failures,
+                lastSeenSendFailures,
+            )
+        ) {
             lastSeenSendFailures = failures
             startReconnect("send failures")
         }
@@ -688,6 +697,7 @@ class StreamingService : LifecycleService() {
     private fun registerWifiCallback() {
         if (wifiCallbackRegistered) return
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        adoptLiveWifiNetworks(cm)
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
@@ -697,6 +707,8 @@ class StreamingService : LifecycleService() {
             wifiCallbackRegistered = true
         } catch (e: RuntimeException) {
             Log.i(TAG, "wifi callback not registered: ${e.message}")
+            // Cannot observe Wi-Fi; keep the give-up window running.
+            wifiUp.set(true)
         }
     }
 
@@ -710,6 +722,35 @@ class StreamingService : LifecycleService() {
         }
         wifiCallbackRegistered = false
         wifiCallbackPrimed = false
+        wifiNetworks.clear()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun adoptLiveWifiNetworks(
+        cm: ConnectivityManager? = null,
+        excluding: Network? = null,
+    ) {
+        val manager = cm
+            ?: getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (manager != null) {
+            try {
+                for (network in manager.allNetworks) {
+                    if (excluding != null && network == excluding) continue
+                    if (isMatchingWifi(manager, network)) {
+                        wifiNetworks.add(network)
+                    }
+                }
+            } catch (_: RuntimeException) {
+                // leave the callback-tracked set as-is
+            }
+        }
+        wifiUp.set(wifiNetworks.isNotEmpty())
+    }
+
+    private fun isMatchingWifi(cm: ConnectivityManager, network: Network): Boolean {
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
     }
 
     // ------------------------------------------------------------------ Orientation

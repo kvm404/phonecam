@@ -741,8 +741,9 @@ class MainActivity : AppCompatActivity() {
             profile.fps,
         )
         sizePreviewCard(profile.width, profile.height)
+        val health = streamingService?.streamHealth()
         val reconnecting = streaming &&
-            streamingService?.streamHealth() is StreamHealth.Reconnecting
+            (health is StreamHealth.Reconnecting || health is StreamHealth.Failed)
         if (streaming && reconnecting) {
             val name = streamingService?.laptopName() ?: payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_reconnecting, name)

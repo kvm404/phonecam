@@ -159,6 +159,76 @@ class ReconnectControllerTest {
     }
 
     @Test
+    fun `give-up is terminal and a later start does not POST`() = runTest {
+        var now = 0L
+        val client = FakeControlClient { ReconnectResult.Failure("down") }
+        val controller = ReconnectController(
+            client = client,
+            creds = creds(),
+            clock = { now },
+            wifiAvailable = { true },
+            resolveIdentity = { RtpEndpoint(40000, 1L) },
+            delayMs = { ms ->
+                now += ms
+                kotlinx.coroutines.delay(ms)
+            },
+        )
+
+        controller.start()
+        val health = controller.health.value
+        assertTrue("expected Failed, was $health", health is StreamHealth.Failed)
+        val posts = client.requests.size
+        assertTrue(posts > 1)
+
+        controller.start()
+        assertEquals(posts, client.requests.size)
+        assertTrue(controller.health.value is StreamHealth.Failed)
+        assertEquals(
+            "lost laptop — rescan the QR",
+            (controller.health.value as StreamHealth.Failed).message,
+        )
+    }
+
+    @Test
+    fun `watchdog ignores session mismatch and send failures while Reconnecting`() {
+        val reconnecting = StreamHealth.Reconnecting(2)
+        assertTrue(
+            !ReconnectController.shouldStartOnStatus(
+                reconnecting, approved = false, statusSession = "b", liveSession = "a",
+            ),
+        )
+        assertTrue(
+            !ReconnectController.shouldStartOnSendFailures(reconnecting, failures = 4, lastSeen = 1),
+        )
+        assertTrue(
+            ReconnectController.shouldStartOnStatus(
+                StreamHealth.Live, approved = false, statusSession = "a", liveSession = "a",
+            ),
+        )
+        // Compare to the live session after GET, not a pre-request snapshot.
+        assertTrue(
+            !ReconnectController.shouldStartOnStatus(
+                StreamHealth.Live, approved = true, statusSession = "new", liveSession = "new",
+            ),
+        )
+        assertTrue(
+            ReconnectController.shouldStartOnStatus(
+                StreamHealth.Live, approved = true, statusSession = "new", liveSession = "old",
+            ),
+        )
+        assertTrue(
+            ReconnectController.shouldStartOnSendFailures(
+                StreamHealth.Live, failures = 3, lastSeen = 1,
+            ),
+        )
+        assertTrue(
+            !ReconnectController.shouldStartOnSendFailures(
+                StreamHealth.Live, failures = 3, lastSeen = 3,
+            ),
+        )
+    }
+
+    @Test
     fun `second start is a no-op while a loop is running`() = runTest {
         var now = 0L
         val client = FakeControlClient { ReconnectResult.Failure("down") }

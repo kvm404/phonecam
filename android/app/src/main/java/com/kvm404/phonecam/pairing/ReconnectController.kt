@@ -65,10 +65,11 @@ class ReconnectController(
 
     /**
      * Run the reconnect loop to Live or Failed. A second call while a loop is
-     * already running is a no-op.
+     * already running is a no-op. Give-up is terminal: [start] will not run
+     * another 60 s window after [StreamHealth.Failed].
      */
     suspend fun start() {
-        if (cancelled) return
+        if (cancelled || _health.value is StreamHealth.Failed) return
         if (!inFlight.compareAndSet(false, true)) return
         try {
             runLoop()
@@ -152,6 +153,7 @@ class ReconnectController(
         val now = clock()
         val start = windowStart ?: now
         if (now - start >= GIVE_UP_MS) {
+            cancelled = true
             _health.value = StreamHealth.Failed(GIVE_UP_MESSAGE)
             return start to true
         }
@@ -165,9 +167,29 @@ class ReconnectController(
     }
 
     companion object {
-        const val GIVE_UP_MESSAGE = "lost laptop — rescan or tap Reconnect"
+        const val GIVE_UP_MESSAGE = "lost laptop — rescan the QR"
         const val GIVE_UP_MS = 60_000L
         val BACKOFF_MS = longArrayOf(500L, 1_000L, 2_000L, 4_000L, 8_000L)
         private const val WIFI_POLL_MS = 500L
+
+        /** Watchdog: skip session/send-failure triggers while a loop is already running. */
+        fun shouldStartOnStatus(
+            health: StreamHealth,
+            approved: Boolean,
+            statusSession: String,
+            liveSession: String?,
+        ): Boolean {
+            if (health is StreamHealth.Reconnecting) return false
+            if (!approved) return true
+            return statusSession.isNotBlank() &&
+                liveSession != null &&
+                statusSession != liveSession
+        }
+
+        fun shouldStartOnSendFailures(
+            health: StreamHealth,
+            failures: Int,
+            lastSeen: Int,
+        ): Boolean = health !is StreamHealth.Reconnecting && failures > lastSeen
     }
 }
