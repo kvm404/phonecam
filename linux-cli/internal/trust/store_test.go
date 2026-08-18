@@ -338,6 +338,23 @@ func TestRevokeByIDOrNameAndRevokeAll(t *testing.T) {
 	}
 }
 
+func TestPutWritesProvidedSecretWithoutReminting(t *testing.T) {
+	fs := newFakeFS()
+	fs.env["XDG_CONFIG_HOME"] = "/cfg"
+	store, err := Open(fs, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	if err := store.Put("phone-1", "Pixel", "given-secret", now); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, ok := store.LookupBySecret("phone-1", "given-secret")
+	if !ok || got.Name != "Pixel" {
+		t.Fatalf("Put must store the provided secret, got %#v ok=%v", got, ok)
+	}
+}
+
 func TestOpenRoundTripsExistingFile(t *testing.T) {
 	fs := newFakeFS()
 	fs.env["XDG_CONFIG_HOME"] = "/cfg"

@@ -210,21 +210,39 @@ func (s *Store) LookupBySecret(phoneID, secret string) (Phone, bool) {
 	return found, matched == 1
 }
 
+// NewSecret mints a 256-bit pairing_secret. Callers attach it to the
+// session before Approve so TakeSecrets cannot race an empty one-shot.
+func NewSecret() (string, error) {
+	return randomBase64URL(SecretBytes)
+}
+
 // Upsert writes a phone. Same id rotates the secret (fresh QR pair),
 // updates name and last_seen, and keeps created_at. A new id beyond
 // MaxPhones evicts the least-recent last_seen and prints one line.
 func (s *Store) Upsert(id, name string, now time.Time) (secret string, err error) {
+	secret, err = NewSecret()
+	if err != nil {
+		return "", err
+	}
+	if err := s.Put(id, name, secret, now); err != nil {
+		return "", err
+	}
+	return secret, nil
+}
+
+// Put writes a caller-minted secret. Same id replaces the secret in place
+// (no second mint). Used after Approve so the disk value matches TakeSecrets.
+func (s *Store) Put(id, name, secret string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id == "" {
-		return "", ErrEmptyID
+		return ErrEmptyID
+	}
+	if secret == "" {
+		return ErrEmptyID
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
-	}
-	secret, err = randomBase64URL(SecretBytes)
-	if err != nil {
-		return "", err
 	}
 
 	for i, p := range s.data.Phones {
@@ -233,10 +251,7 @@ func (s *Store) Upsert(id, name string, now time.Time) (secret string, err error
 			p.Secret = secret
 			p.LastSeen = now.UTC()
 			s.data.Phones[i] = p
-			if err := s.saveLocked(); err != nil {
-				return "", err
-			}
-			return secret, nil
+			return s.saveLocked()
 		}
 	}
 
@@ -259,10 +274,7 @@ func (s *Store) Upsert(id, name string, now time.Time) (secret string, err error
 		CreatedAt: now.UTC(),
 		LastSeen:  now.UTC(),
 	})
-	if err := s.saveLocked(); err != nil {
-		return "", err
-	}
-	return secret, nil
+	return s.saveLocked()
 }
 
 // Touch updates last_seen for a successful trusted reconnect.

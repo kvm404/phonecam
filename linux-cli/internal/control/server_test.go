@@ -150,6 +150,27 @@ func (m *memTrust) Count() int {
 	return len(m.phones)
 }
 
+func (m *memTrust) Put(id, name, secret string, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if id == "" || secret == "" {
+		return trust.ErrEmptyID
+	}
+	for i, p := range m.phones {
+		if p.ID == id {
+			p.Name = name
+			p.Secret = secret
+			p.LastSeen = now
+			m.phones[i] = p
+			return nil
+		}
+	}
+	m.phones = append(m.phones, trust.Phone{
+		ID: id, Name: name, Secret: secret, CreatedAt: now, LastSeen: now,
+	})
+	return nil
+}
+
 func (m *memTrust) Touch(phoneID string, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -882,6 +903,50 @@ func TestStatusOneShotSecretsToApprovedIPOnly(t *testing.T) {
 	second := getStatusFrom(server, "192.168.1.50:40000")
 	if _, ok := mustJSONMap(t, second.Body.Bytes())["resume_token"]; ok {
 		t.Fatal("second /status must not repeat secrets")
+	}
+}
+
+func TestStatusOneShotIncludesPairingSecretWhenStoreConfigured(t *testing.T) {
+	session, now := newTestSession(t)
+	store := &memTrust{}
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now.Add(time.Second)},
+		Trust:   store,
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("pair: %d %s", pairRec.Code, pairRec.Body.String())
+	}
+	if _, ok := mustJSONMap(t, pairRec.Body.Bytes())["pairing_secret"]; ok {
+		t.Fatal("require-approval 202 must not include pairing_secret")
+	}
+
+	if rec := postLocalJSON(server, "/approve", approveRequest{SessionID: session.Payload().SessionID}); rec.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
+	}
+
+	first := getStatusFrom(server, "192.168.1.50:40000")
+	body := mustJSONMap(t, first.Body.Bytes())
+	resume, _ := body["resume_token"].(string)
+	secret, _ := body["pairing_secret"].(string)
+	if resume == "" || secret == "" {
+		t.Fatalf("expected one-shot resume_token and pairing_secret, got %s", first.Body.String())
+	}
+	if _, ok := store.LookupBySecret("phone-1", secret); !ok {
+		t.Fatal("one-shot pairing_secret must match the store")
+	}
+
+	second := getStatusFrom(server, "192.168.1.50:40000")
+	if _, ok := mustJSONMap(t, second.Body.Bytes())["pairing_secret"]; ok {
+		t.Fatal("second /status must not repeat pairing_secret")
 	}
 }
 

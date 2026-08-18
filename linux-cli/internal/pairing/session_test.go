@@ -287,6 +287,37 @@ func TestApproveTrustedIgnoresTTLAndDoesNotInvalidate(t *testing.T) {
 	}
 }
 
+func TestApproveWithSecretSetsPairingInSameLock(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if err := session.ApproveWithSecret(now.Add(2*time.Second), "atomic-secret"); err != nil {
+		t.Fatalf("ApproveWithSecret: %v", err)
+	}
+	resume, pairing, ok := session.TakeSecrets()
+	if !ok || resume == "" || pairing != "atomic-secret" {
+		t.Fatalf("expected atomic pairing secret, got resume=%q pairing=%q ok=%v", resume, pairing, ok)
+	}
+}
+
+func TestApproveNoOpDoesNotRotatePairingSecret(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	source := RTPSource{IP: net.ParseIP("192.168.1.60"), Port: 51000, SSRC: 99}
+	if err := session.ApproveTrusted(Phone{ID: "trusted", Name: "A"}, source, nil); err != nil {
+		t.Fatalf("ApproveTrusted: %v", err)
+	}
+	session.SetPairingSecret("keep-me")
+	if err := session.ApproveWithSecret(now.Add(time.Hour), "rotated"); err != nil {
+		t.Fatalf("no-op Approve: %v", err)
+	}
+	if session.PairingSecret() != "keep-me" {
+		t.Fatalf("already-approved Approve must not rotate pairing_secret, got %q", session.PairingSecret())
+	}
+}
+
 func TestApproveTrustedDoesNotRotatePairingSecret(t *testing.T) {
 	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	session := newTestSession(t, Config{Now: now})

@@ -240,6 +240,17 @@ func (s *Session) ConsumeToken(request TokenRequest, now time.Time) error {
 }
 
 func (s *Session) Approve(now time.Time) error {
+	return s.approve(now, "")
+}
+
+// ApproveWithSecret is Approve plus pairing_secret in the same lock so a
+// concurrent TakeSecrets cannot observe an approved session with an empty
+// pairing field. already-approved is still a no-op (secret is not rotated).
+func (s *Session) ApproveWithSecret(now time.Time, secret string) error {
+	return s.approve(now, secret)
+}
+
+func (s *Session) approve(now time.Time, secret string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -265,16 +276,26 @@ func (s *Session) Approve(now time.Time) error {
 	s.approved = true
 	s.approvedPhone = s.pendingPhone
 	s.resumeToken = token
+	if secret != "" {
+		s.pairingSecret = secret
+	}
 	s.secretsTaken = false
 	return nil
 }
 
-// SetPairingSecret attaches the long-lived pairing_secret minted by the
-// trust store after Approve. TakeSecrets returns it when set.
+// SetPairingSecret attaches the long-lived pairing_secret. Call it before
+// Approve so one-shot TakeSecrets cannot race an empty pairing field.
 func (s *Session) SetPairingSecret(secret string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pairingSecret = secret
+}
+
+// PairingSecret returns the attached pairing_secret, or empty.
+func (s *Session) PairingSecret() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pairingSecret
 }
 
 // ApproveTrusted installs a trusted phone without consulting QR TTL and

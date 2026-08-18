@@ -389,7 +389,8 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 						pairSession.Invalidate()
 						return err
 					}
-					persistApproved(pairSession, config.Trust, time.Now().UTC())
+					// Persist lives in control.Server after Approve; do not
+					// Upsert here or a later handlePair persist would rotate.
 					fmt.Fprintf(stdout, "Auto-approved phone %q.\n", phone.Name)
 					autoApprovedHere = true
 					continue
@@ -422,13 +423,12 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 		case answer := <-answerCh:
 			switch strings.ToLower(strings.TrimSpace(answer)) {
 			case "y", "yes":
-				if err := pairSession.Approve(time.Now().UTC()); err != nil {
+				if err := persistAndApprove(pairSession, config.Trust, time.Now().UTC()); err != nil {
 					fmt.Fprintln(stdout, err)
 					shutdownServer()
 					pairSession.Invalidate()
 					return err
 				}
-				persistApproved(pairSession, config.Trust, time.Now().UTC())
 				// Approved: the loop condition now exits and start proceeds.
 			default:
 				fmt.Fprintln(stdout, "Pairing denied.")
@@ -692,19 +692,34 @@ func gateRunError(ctx context.Context, err error) error {
 	return fmt.Errorf("rtp gate: %w", err)
 }
 
-func persistApproved(session *pairing.Session, store *trust.Store, now time.Time) {
-	if store == nil || session == nil {
-		return
+// persistAndApprove attaches pairing_secret before flipping approved so a
+// one-shot /status cannot TakeSecrets with an empty pairing field. If the
+// session is already approved (ApproveTrusted, HTTP /approve), Approve is a
+// no-op and the store is not rotated.
+func persistAndApprove(session *pairing.Session, store *trust.Store, now time.Time) error {
+	if session == nil {
+		return pairing.ErrInvalidated
 	}
-	phone := session.ApprovedPhone()
-	if phone.ID == "" {
-		return
+	if session.IsApproved() {
+		return session.Approve(now)
 	}
-	secret, err := store.Upsert(phone.ID, phone.Name, now)
-	if err != nil || secret == "" {
-		return
+	phone, pending := session.PendingPhone()
+	secret := ""
+	if store != nil && pending && phone.ID != "" {
+		var err error
+		secret, err = trust.NewSecret()
+		if err != nil {
+			return err
+		}
+		session.SetPairingSecret(secret)
 	}
-	session.SetPairingSecret(secret)
+	if err := session.ApproveWithSecret(now, secret); err != nil {
+		return err
+	}
+	if store != nil && secret != "" {
+		_ = store.Put(phone.ID, phone.Name, secret, now)
+	}
+	return nil
 }
 
 func writeStartOutput(w io.Writer, virtualCamera string, pairSession *pairing.Session, trustedCount int) {

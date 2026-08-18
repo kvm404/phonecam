@@ -49,6 +49,7 @@ type Server struct {
 type TrustStore interface {
 	LookupBySecret(phoneID, secret string) (trust.Phone, bool)
 	Upsert(id, name string, now time.Time) (secret string, err error)
+	Put(id, name, secret string, now time.Time) error
 	List() []trust.PublicPhone
 	Revoke(idOrName string) error
 	Count() int
@@ -216,21 +217,24 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		OK:      true,
 		Session: s.session.Payload().SessionID,
 	}
+	// Attach the pairing_secret before Approve so a one-shot /status poll
+	// cannot TakeSecrets with an empty pairing field.
+	secret := s.attachTrustSecret(request.Phone)
 	if !s.autoApprove {
 		writeJSON(w, http.StatusAccepted, resp)
 		return
 	}
 
-	if err := s.session.Approve(s.clock.Now()); err != nil {
+	if err := s.session.ApproveWithSecret(s.clock.Now(), secret); err != nil {
 		writePairingError(w, err)
 		return
 	}
-	s.persistTrust(request.Phone)
+	s.flushTrustSecret(request.Phone, secret)
 	s.pinMedia()
-	resume, secret, _ := s.session.TakeSecrets()
+	resume, pairingSecret, _ := s.session.TakeSecrets()
 	resp.Approved = true
 	resp.ResumeToken = resume
-	resp.PairingSecret = secret
+	resp.PairingSecret = pairingSecret
 	writeJSON(w, http.StatusAccepted, resp)
 }
 
@@ -255,12 +259,18 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	already := s.session.IsApproved()
-	if err := s.session.Approve(s.clock.Now()); err != nil {
+	secret := ""
+	if !already {
+		if phone, ok := s.session.PendingPhone(); ok {
+			secret = s.attachTrustSecret(phone)
+		}
+	}
+	if err := s.session.ApproveWithSecret(s.clock.Now(), secret); err != nil {
 		writePairingError(w, err)
 		return
 	}
 	if !already {
-		s.persistTrust(s.session.ApprovedPhone())
+		s.flushTrustSecret(s.session.ApprovedPhone(), secret)
 	}
 
 	writeJSON(w, http.StatusOK, statusResponse{
@@ -418,15 +428,33 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-func (s *Server) persistTrust(phone pairing.Phone) {
-	if s.trust == nil || phone.ID == "" {
-		return
+// attachTrustSecret mints a pairing_secret onto the session before Approve.
+// It does not write the store: a denied/failed approve must not rotate disk.
+// Already-approved sessions keep an existing secret. A different approved
+// phone (ApproveTrusted) is not overwritten.
+func (s *Server) attachTrustSecret(phone pairing.Phone) string {
+	if s.trust == nil || s.session == nil || phone.ID == "" {
+		return ""
 	}
-	secret, err := s.trust.Upsert(phone.ID, phone.Name, s.clock.Now())
+	if existing := s.session.PairingSecret(); existing != "" {
+		return existing
+	}
+	if s.session.IsApproved() && s.session.ApprovedPhone().ID != phone.ID {
+		return ""
+	}
+	secret, err := trust.NewSecret()
 	if err != nil || secret == "" {
-		return
+		return ""
 	}
 	s.session.SetPairingSecret(secret)
+	return secret
+}
+
+func (s *Server) flushTrustSecret(phone pairing.Phone, secret string) {
+	if s.trust == nil || phone.ID == "" || secret == "" {
+		return
+	}
+	_ = s.trust.Put(phone.ID, phone.Name, secret, s.clock.Now())
 }
 
 func (s *Server) handleTrustList(w http.ResponseWriter, r *http.Request) {
