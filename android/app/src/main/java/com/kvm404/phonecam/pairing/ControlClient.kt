@@ -16,7 +16,12 @@ data class PhoneIdentity(
 /** Outcome of a POST /pair request. */
 sealed interface PairResult {
     /** Server accepted the token (HTTP 202). [approved] is usually false at this point. */
-    data class Accepted(val approved: Boolean, val session: String) : PairResult
+    data class Accepted(
+        val approved: Boolean,
+        val session: String,
+        val resumeToken: String? = null,
+        val pairingSecret: String? = null,
+    ) : PairResult
 
     /** Server rejected the request or the call failed. */
     data class Failure(val message: String) : PairResult
@@ -24,9 +29,40 @@ sealed interface PairResult {
 
 /** Outcome of a GET /status request. */
 sealed interface StatusResult {
-    data class Ok(val approved: Boolean, val session: String) : StatusResult
+    data class Ok(
+        val approved: Boolean,
+        val session: String,
+        val resumeToken: String? = null,
+        val pairingSecret: String? = null,
+    ) : StatusResult
 
     data class Failure(val message: String) : StatusResult
+}
+
+/** Body for POST /reconnect. pairingSecret is sent when held; the laptop ignores it this PR. */
+data class ReconnectRequest(
+    val payload: PairingPayload,
+    val phone: PhoneIdentity,
+    val rtpPort: Int,
+    val ssrc: Long,
+    val video: VideoProfile,
+    val resumeToken: String? = null,
+    val pairingSecret: String? = null,
+    val camera: String? = null,
+)
+
+/** Outcome of a POST /reconnect request. HTTP 200 only. */
+sealed interface ReconnectResult {
+    data class Ok(
+        val approved: Boolean,
+        val session: String,
+        val resumeToken: String,
+        val control: String,
+        val rtp: String,
+        val video: VideoProfile? = null,
+    ) : ReconnectResult
+
+    data class Failure(val message: String) : ReconnectResult
 }
 
 /** Control-plane client contract, kept small so tests can supply a fake. */
@@ -40,6 +76,8 @@ interface ControlClient {
     ): PairResult
 
     fun status(payload: PairingPayload): StatusResult
+
+    fun reconnect(request: ReconnectRequest): ReconnectResult
 }
 
 /**
@@ -89,6 +127,8 @@ class HttpControlClient(
                 PairResult.Accepted(
                     approved = json.optBoolean("approved", false),
                     session = json.optString("session", payload.session),
+                    resumeToken = json.optNonBlank("resume_token"),
+                    pairingSecret = json.optNonBlank("pairing_secret"),
                 )
             } else {
                 PairResult.Failure(errorMessage(code, responseBody))
@@ -108,6 +148,8 @@ class HttpControlClient(
                 StatusResult.Ok(
                     approved = json.optBoolean("approved", false),
                     session = json.optString("session", payload.session),
+                    resumeToken = json.optNonBlank("resume_token"),
+                    pairingSecret = json.optNonBlank("pairing_secret"),
                 )
             } else {
                 StatusResult.Failure(errorMessage(code, responseBody))
@@ -116,6 +158,53 @@ class HttpControlClient(
             StatusResult.Failure("invalid status response from laptop")
         } catch (e: IOException) {
             StatusResult.Failure("could not reach laptop: ${e.message ?: "network error"}")
+        }
+    }
+
+    override fun reconnect(request: ReconnectRequest): ReconnectResult {
+        val body = JSONObject().apply {
+            put("phone", JSONObject().apply {
+                put("id", request.phone.id)
+                put("name", request.phone.name)
+            })
+            put("rtp_port", request.rtpPort)
+            put("ssrc", request.ssrc)
+            put("video", JSONObject().apply {
+                put("width", request.video.width)
+                put("height", request.video.height)
+                put("fps", request.video.fps)
+            })
+            request.resumeToken?.takeIf { it.isNotBlank() }?.let { put("resume_token", it) }
+            request.pairingSecret?.takeIf { it.isNotBlank() }?.let { put("pairing_secret", it) }
+            request.camera?.takeIf { it.isNotBlank() }?.let { put("camera", it) }
+        }.toString()
+
+        return try {
+            val (code, responseBody) = post("${baseUrl(request.payload)}/reconnect", body)
+            if (code == HttpURLConnection.HTTP_OK) {
+                val json = JSONObject(responseBody)
+                val videoJson = json.optJSONObject("video")
+                ReconnectResult.Ok(
+                    approved = json.optBoolean("approved", false),
+                    session = json.optString("session", request.payload.session),
+                    resumeToken = json.optString("resume_token", ""),
+                    control = json.optString("control", ""),
+                    rtp = json.optString("rtp", ""),
+                    video = videoJson?.let {
+                        VideoProfile(
+                            it.optInt("width"),
+                            it.optInt("height"),
+                            it.optInt("fps"),
+                        )
+                    },
+                )
+            } else {
+                ReconnectResult.Failure(errorMessage(code, responseBody))
+            }
+        } catch (e: JSONException) {
+            ReconnectResult.Failure("invalid reconnect response from laptop")
+        } catch (e: IOException) {
+            ReconnectResult.Failure("could not reach laptop: ${e.message ?: "network error"}")
         }
     }
 
@@ -169,3 +258,6 @@ class HttpControlClient(
         return code to text
     }
 }
+
+private fun JSONObject.optNonBlank(key: String): String? =
+    optString(key).takeIf { it.isNotBlank() }

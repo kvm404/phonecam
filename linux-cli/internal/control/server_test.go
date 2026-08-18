@@ -2,9 +2,13 @@ package control
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +28,45 @@ func (m stubMedia) Stats() rtp.Stats { return m.stats }
 func (m stubMedia) RestartReceiver(pairing.VideoProfile) error { return nil }
 
 func (m stubMedia) ReceiverRestarts() int { return m.restarts }
+
+type recordingMedia struct {
+	mu       sync.Mutex
+	allows   []pairing.RTPSource
+	restarts []pairing.VideoProfile
+	stats    rtp.Stats
+}
+
+func (m *recordingMedia) SetAllow(src pairing.RTPSource) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.allows = append(m.allows, src)
+}
+
+func (m *recordingMedia) Stats() rtp.Stats { return m.stats }
+
+func (m *recordingMedia) RestartReceiver(video pairing.VideoProfile) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.restarts = append(m.restarts, video)
+	return nil
+}
+
+func (m *recordingMedia) ReceiverRestarts() int { return 0 }
+
+func (m *recordingMedia) restartCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.restarts)
+}
+
+func (m *recordingMedia) lastAllow() (pairing.RTPSource, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.allows) == 0 {
+		return pairing.RTPSource{}, false
+	}
+	return m.allows[len(m.allows)-1], true
+}
 
 type fakeClock struct {
 	now time.Time
@@ -64,6 +107,13 @@ func TestPairingReturnsPayload(t *testing.T) {
 	if payload.SessionID != session.Payload().SessionID || payload.Token == "" {
 		t.Fatalf("unexpected payload: %#v", payload)
 	}
+	raw := mustJSONMap(t, recorder.Body.Bytes())
+	if _, ok := raw["resume_token"]; ok {
+		t.Fatal("GET /pairing must not include resume_token")
+	}
+	if _, ok := raw["pairing_secret"]; ok {
+		t.Fatal("GET /pairing must not include pairing_secret")
+	}
 }
 
 func TestPairingRejectsNonLocalRequest(t *testing.T) {
@@ -97,6 +147,16 @@ func TestPairConsumesTokenAndWaitsForApproval(t *testing.T) {
 	}
 	if session.IsApproved() {
 		t.Fatal("pairing should not auto-approve")
+	}
+	body := mustJSONMap(t, recorder.Body.Bytes())
+	if approved, _ := body["approved"].(bool); approved {
+		t.Fatalf("require-approval 202 must have approved=false, got %#v", body)
+	}
+	if _, ok := body["resume_token"]; ok {
+		t.Fatal("require-approval 202 must not include resume_token")
+	}
+	if _, ok := body["pairing_secret"]; ok {
+		t.Fatal("require-approval 202 must not include pairing_secret")
 	}
 }
 
@@ -389,4 +449,335 @@ func postJSONFrom(handler http.Handler, path string, value any, remoteAddr strin
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	return recorder
+}
+
+func getStatusFrom(handler http.Handler, remoteAddr string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "/status", nil)
+	request.RemoteAddr = remoteAddr
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func TestPairAutoApproveReturnsSecretsOn202(t *testing.T) {
+	session, now := newTestSession(t)
+	media := &recordingMedia{}
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		Media:       media,
+		AutoApprove: true,
+	}).Handler()
+
+	recorder := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+		Video:     &pairing.VideoProfile{Width: 640, Height: 360, FPS: 30},
+		Camera:    "back",
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !session.IsApproved() {
+		t.Fatal("expected auto-approve to approve the session")
+	}
+
+	body := mustJSONMap(t, recorder.Body.Bytes())
+	if approved, _ := body["approved"].(bool); !approved {
+		t.Fatalf("expected approved=true, got %#v", body)
+	}
+	resume, _ := body["resume_token"].(string)
+	raw, err := base64.RawURLEncoding.DecodeString(resume)
+	if err != nil || len(raw) != pairing.TokenBytes {
+		t.Fatalf("expected 256-bit resume_token, got %q (%v)", resume, err)
+	}
+	if _, ok := body["pairing_secret"]; ok {
+		t.Fatal("pairing_secret must be omitted without a trust store")
+	}
+	if media.restartCount() != 1 {
+		t.Fatalf("auto-approve pair should stash via RestartReceiver once, got %d", media.restartCount())
+	}
+	allow, ok := media.lastAllow()
+	if !ok || allow.Port != 50000 || allow.SSRC != 1234 {
+		t.Fatalf("expected SetAllow of paired source, got %#v", allow)
+	}
+
+	status := getStatusFrom(server, "192.168.1.50:40000")
+	if _, ok := mustJSONMap(t, status.Body.Bytes())["resume_token"]; ok {
+		t.Fatal("auto-approve /status must not repeat secrets")
+	}
+}
+
+func TestPairAlwaysAcceptedWhenAutoApprove(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		AutoApprove: true,
+	}).Handler()
+
+	recorder := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("POST /pair must stay 202, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestReconnectSamePhoneRebind(t *testing.T) {
+	session, now := newTestSession(t)
+	media := &recordingMedia{}
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		Media:       media,
+		AutoApprove: true,
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	resume := mustJSONMap(t, pairRec.Body.Bytes())["resume_token"].(string)
+
+	recorder := postJSONFrom(server, "/reconnect", reconnectRequest{
+		Phone:       pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:     51000,
+		SSRC:        99,
+		ResumeToken: resume,
+		Video:       &pairing.VideoProfile{Width: 640, Height: 360, FPS: 30},
+		Camera:      "front",
+	}, "192.168.1.60:40000")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	var got reconnectResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("reconnect json: %v", err)
+	}
+	if !got.OK || !got.Approved || got.ResumeToken != resume {
+		t.Fatalf("expected echoed live resume_token, got %#v", got)
+	}
+	if got.Session != session.Payload().SessionID {
+		t.Fatalf("unexpected session %q", got.Session)
+	}
+	if got.Control != session.Payload().Control || got.RTP != session.Payload().RTP {
+		t.Fatalf("expected control/rtp echo, got %#v", got)
+	}
+	if got.Video != (pairing.VideoProfile{Width: 640, Height: 360, FPS: 30}) {
+		t.Fatalf("expected rebound video, got %#v", got.Video)
+	}
+
+	src, ok := session.ApprovedSource()
+	if !ok || src.Port != 51000 || src.SSRC != 99 || !src.IP.Equal(net.ParseIP("192.168.1.60")) {
+		t.Fatalf("expected rebound source, got %#v", src)
+	}
+	allow, ok := media.lastAllow()
+	if !ok || allow.Port != 51000 || allow.SSRC != 99 {
+		t.Fatalf("expected SetAllow after rebind, got %#v", allow)
+	}
+	if media.restartCount() != 2 {
+		t.Fatalf("expected RestartReceiver on pair and reconnect, got %d", media.restartCount())
+	}
+
+	status := getStatusFrom(server, "192.168.1.60:40000")
+	statusBody := mustJSONMap(t, status.Body.Bytes())
+	if statusBody["camera"] != "front" {
+		t.Fatalf("expected camera echo, got %#v", statusBody)
+	}
+	if _, ok := statusBody["resume_token"]; ok {
+		t.Fatal("GET /status must not include standing secrets")
+	}
+}
+
+func TestReconnectRejectsBadResumeToken(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		AutoApprove: true,
+	}).Handler()
+	postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+
+	recorder := postJSON(server, "/reconnect", reconnectRequest{
+		Phone:       pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:     51000,
+		SSRC:        99,
+		ResumeToken: "not-the-token",
+	})
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if mustJSONMap(t, recorder.Body.Bytes())["error"] != "unauthorized" {
+		t.Fatalf("expected generic unauthorized, got %s", recorder.Body.String())
+	}
+}
+
+func TestReconnectPairingSecretOnlyUnauthorized(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		AutoApprove: true,
+	}).Handler()
+	postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+
+	recorder := postJSON(server, "/reconnect", reconnectRequest{
+		Phone:         pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:       51000,
+		SSRC:          99,
+		PairingSecret: "stored-secret",
+	})
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without resume_token, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestReconnectDifferentPhoneConflict(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		AutoApprove: true,
+	}).Handler()
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	resume := mustJSONMap(t, pairRec.Body.Bytes())["resume_token"].(string)
+
+	recorder := postJSON(server, "/reconnect", reconnectRequest{
+		Phone:       pairing.Phone{ID: "phone-2", Name: "Other"},
+		RTPPort:     51000,
+		SSRC:        99,
+		ResumeToken: resume,
+	})
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestStatusOneShotSecretsToApprovedIPOnly(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{Session: session, Clock: fakeClock{now: now.Add(time.Second)}}).Handler()
+
+	postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if rec := postLocalJSON(server, "/approve", approveRequest{SessionID: session.Payload().SessionID}); rec.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
+	}
+
+	loopback := getStatusFrom(server, "127.0.0.1:9")
+	if _, ok := mustJSONMap(t, loopback.Body.Bytes())["resume_token"]; ok {
+		t.Fatal("loopback /status must never include secrets")
+	}
+
+	other := getStatusFrom(server, "192.168.1.51:40000")
+	if _, ok := mustJSONMap(t, other.Body.Bytes())["resume_token"]; ok {
+		t.Fatal("non-approved IP must not receive secrets")
+	}
+
+	first := getStatusFrom(server, "192.168.1.50:40000")
+	resume, _ := mustJSONMap(t, first.Body.Bytes())["resume_token"].(string)
+	if resume == "" {
+		t.Fatalf("expected one-shot resume_token for approved IP, got %s", first.Body.String())
+	}
+	if _, ok := mustJSONMap(t, first.Body.Bytes())["pairing_secret"]; ok {
+		t.Fatal("pairing_secret must be omitted without a trust store")
+	}
+
+	second := getStatusFrom(server, "192.168.1.50:40000")
+	if _, ok := mustJSONMap(t, second.Body.Bytes())["resume_token"]; ok {
+		t.Fatal("second /status must not repeat secrets")
+	}
+}
+
+func TestReconnectRateLimit(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		AutoApprove: true,
+	}).Handler()
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	resume := mustJSONMap(t, pairRec.Body.Bytes())["resume_token"].(string)
+	req := reconnectRequest{
+		Phone:       pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:     51000,
+		SSRC:        99,
+		ResumeToken: resume,
+	}
+
+	var last *httptest.ResponseRecorder
+	for i := 0; i < 6; i++ {
+		last = postJSONFrom(server, "/reconnect", req, "192.168.1.50:40000")
+	}
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after 5 req/s, got %d: %s", last.Code, last.Body.String())
+	}
+
+	session2, now2 := newTestSession(t)
+	server2 := New(Config{
+		Session:     session2,
+		Clock:       fakeClock{now: now2.Add(time.Second)},
+		AutoApprove: true,
+	}).Handler()
+	pair2 := postJSON(server2, "/pair", pairRequest{
+		SessionID: session2.Payload().SessionID,
+		Token:     session2.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	resume2 := mustJSONMap(t, pair2.Body.Bytes())["resume_token"].(string)
+	req2 := reconnectRequest{
+		Phone:       pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:     51000,
+		SSRC:        99,
+		ResumeToken: resume2,
+	}
+	var lastPhone *httptest.ResponseRecorder
+	for i := 0; i < 21; i++ {
+		lastPhone = postJSONFrom(server2, "/reconnect", req2, fmt.Sprintf("10.0.0.%d:40000", i+1))
+	}
+	if lastPhone.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after 20/min/phone, got %d: %s", lastPhone.Code, lastPhone.Body.String())
+	}
 }

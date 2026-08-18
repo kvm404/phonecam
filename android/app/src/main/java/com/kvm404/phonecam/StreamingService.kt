@@ -50,11 +50,15 @@ object StreamingSession {
     @Volatile var payload: PairingPayload? = null
     @Volatile var rtpIdentity: RtpIdentity? = null
     @Volatile var profile: VideoProfile? = null
+    @Volatile var resumeToken: String? = null
+    @Volatile var pairingSecret: String? = null
 
     data class Handoff(
         val payload: PairingPayload,
         val profile: VideoProfile,
         val rtpIdentity: RtpIdentity,
+        val resumeToken: String?,
+        val pairingSecret: String?,
     )
 
     @Synchronized
@@ -62,10 +66,14 @@ object StreamingSession {
         val currentPayload = payload ?: return null
         val currentProfile = profile ?: return null
         val currentRtp = rtpIdentity ?: return null
+        val currentResume = resumeToken
+        val currentSecret = pairingSecret
         payload = null
         profile = null
         rtpIdentity = null
-        return Handoff(currentPayload, currentProfile, currentRtp)
+        resumeToken = null
+        pairingSecret = null
+        return Handoff(currentPayload, currentProfile, currentRtp, currentResume, currentSecret)
     }
 
     @Synchronized
@@ -74,6 +82,8 @@ object StreamingSession {
         payload = null
         rtpIdentity = null
         profile = null
+        resumeToken = null
+        pairingSecret = null
     }
 
     @Synchronized
@@ -81,6 +91,8 @@ object StreamingSession {
         payload = null
         rtpIdentity = null
         profile = null
+        resumeToken = null
+        pairingSecret = null
     }
 }
 
@@ -128,6 +140,8 @@ class StreamingService : LifecycleService() {
     private var canvas: VideoProfile? = null
     private var payload: PairingPayload? = null
     private var rtpIdentity: RtpIdentity? = null
+    private var resumeToken: String? = null
+    private var pairingSecret: String? = null
     private var videoEncoder: VideoEncoder? = null
 
     private var wifiLock: WifiManager.WifiLock? = null
@@ -263,6 +277,8 @@ class StreamingService : LifecycleService() {
         payload = current
         canvas = handoff.profile
         rtpIdentity = handoff.rtpIdentity
+        resumeToken = handoff.resumeToken
+        pairingSecret = handoff.pairingSecret
         previewWanted = pendingPreviewWanted
 
         startForegroundNotification(current.name)

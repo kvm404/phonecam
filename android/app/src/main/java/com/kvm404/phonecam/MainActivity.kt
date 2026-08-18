@@ -624,7 +624,7 @@ class MainActivity : AppCompatActivity() {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     controller.state.collect { state ->
                         when (state) {
-                            is PairingState.Paired -> onPaired()
+                            is PairingState.Paired -> onPaired(state)
                             is PairingState.Failed -> failToHome(state.message)
                             else -> updateLiveUi()
                         }
@@ -643,7 +643,7 @@ class MainActivity : AppCompatActivity() {
      * pairing happens on the visible Live screen, so that holds. Idempotent against rapid
      * re-emission of [PairingState.Paired].
      */
-    private fun onPaired() {
+    private fun onPaired(paired: PairingState.Paired) {
         val current = payload ?: return
         val profile = committedProfile ?: return
         val rtp = rtpIdentity ?: return
@@ -660,7 +660,7 @@ class MainActivity : AppCompatActivity() {
                         while ((bound || StreamingService.isRunning) && !leaveRequested) {
                             delay(40)
                         }
-                        if (!leaveRequested) onPaired()
+                        if (!leaveRequested) onPaired(paired)
                     } finally {
                         waitingToStartService = false
                     }
@@ -673,6 +673,8 @@ class MainActivity : AppCompatActivity() {
         StreamingSession.payload = current
         StreamingSession.profile = profile
         StreamingSession.rtpIdentity = rtp
+        StreamingSession.resumeToken = paired.resumeToken
+        StreamingSession.pairingSecret = paired.pairingSecret
         rtpIdentity = null // ownership (and the open socket) transfers to the service
 
         keepScreenOn(true)
