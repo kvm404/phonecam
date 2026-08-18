@@ -92,6 +92,7 @@ type probeResult struct {
 	packetsDropped uint64
 	packetsFwd     uint64
 	hasRTP         bool
+	trustedCount   int
 }
 
 // check performs the shared liveness check. When the process is dead or the
@@ -146,6 +147,7 @@ func (m *Manager) probeControl(record session.Record) (probeResult, bool) {
 		LastRTPms      *int64  `json:"last_rtp_ms"`
 		PacketsDropped *uint64 `json:"packets_dropped_acl"`
 		PacketsFwd     *uint64 `json:"packets_forwarded"`
+		TrustedCount   int     `json:"trusted_count"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return probeResult{}, false
@@ -153,7 +155,7 @@ func (m *Manager) probeControl(record session.Record) (probeResult, bool) {
 	if body.Session != record.SessionID {
 		return probeResult{}, false
 	}
-	probe := probeResult{approved: body.Approved, lastRTPms: body.LastRTPms}
+	probe := probeResult{approved: body.Approved, lastRTPms: body.LastRTPms, trustedCount: body.TrustedCount}
 	if body.LastRTPms != nil {
 		probe.hasRTP = true
 	}
@@ -183,6 +185,8 @@ func (m *Manager) Status(stdout, stderr io.Writer) int {
 	pairing := "Waiting for phone"
 	if probe.approved {
 		pairing = "Phone paired and streaming target active"
+	} else if probe.trustedCount > 0 {
+		pairing = "Waiting for phone (trusted reconnect allowed)"
 	}
 	uptime := m.now().Sub(record.StartedAt).Round(time.Second)
 
@@ -195,6 +199,9 @@ func (m *Manager) Status(stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  Pairing:        %s\n", pairing)
 	if probe.hasRTP {
 		fmt.Fprintf(stdout, "  RTP:            %s\n", formatRTPLine(probe))
+	}
+	if probe.trustedCount > 0 {
+		fmt.Fprintf(stdout, "  Trusted phones: %d\n", probe.trustedCount)
 	}
 	return 0
 }

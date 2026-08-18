@@ -31,6 +31,7 @@ data class PairingPayload(
     val expires: String,
     val transport: String,
     val video: VideoProfile,
+    val laptopId: String = "",
 ) {
     companion object {
         const val PROTOCOL_VERSION = 1
@@ -107,6 +108,7 @@ data class PairingPayload(
                 expires = expires,
                 transport = transport,
                 video = VideoProfile(width, height, fps),
+                laptopId = json.optString("laptop_id", ""),
             )
         }
     }

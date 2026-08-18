@@ -251,6 +251,34 @@ func TestStatusRunningWaiting(t *testing.T) {
 	}
 }
 
+func TestStatusWaitingTrustedReconnect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"approved":false,"session":"s1","trusted_count":2}`))
+	}))
+	t.Cleanup(srv.Close)
+	parsed, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := session.Record{PID: 1234, ControlPort: port, SessionID: "s1"}
+	m := newTestManager(&fakeStore{record: record}, &fakeProcess{}, http.DefaultClient)
+	var stdout, stderr bytes.Buffer
+	if code := m.Status(&stdout, &stderr); code != 0 {
+		t.Fatalf("expected 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "Waiting for phone (trusted reconnect allowed)") {
+		t.Fatalf("expected trusted waiting line, got:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Trusted phones: 2") {
+		t.Fatalf("expected trusted count, got:\n%s", stdout.String())
+	}
+}
+
 func TestStopSuccess(t *testing.T) {
 	_, port := statusServer(t, "s1", true)
 	store := &fakeStore{record: session.Record{PID: 1234, ControlPort: port, SessionID: "s1"}}

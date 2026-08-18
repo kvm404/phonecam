@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
 	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
+	"github.com/kvm404/phonecam/linux-cli/internal/trust"
 )
 
 type stubMedia struct {
@@ -74,6 +76,89 @@ type fakeClock struct {
 
 func (f fakeClock) Now() time.Time {
 	return f.now
+}
+
+type memTrust struct {
+	mu     sync.Mutex
+	phones []trust.Phone
+	n      int
+}
+
+func (m *memTrust) LookupBySecret(phoneID, secret string) (trust.Phone, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.phones {
+		if p.ID == phoneID && p.Secret == secret {
+			return p, true
+		}
+	}
+	return trust.Phone{}, false
+}
+
+func (m *memTrust) Upsert(id, name string, now time.Time) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.n++
+	secret := fmt.Sprintf("pairing-secret-%d", m.n)
+	for i, p := range m.phones {
+		if p.ID == id {
+			p.Name = name
+			p.Secret = secret
+			p.LastSeen = now
+			m.phones[i] = p
+			return secret, nil
+		}
+	}
+	m.phones = append(m.phones, trust.Phone{
+		ID: id, Name: name, Secret: secret, CreatedAt: now, LastSeen: now,
+	})
+	return secret, nil
+}
+
+func (m *memTrust) List() []trust.PublicPhone {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]trust.PublicPhone, 0, len(m.phones))
+	for _, p := range m.phones {
+		out = append(out, trust.PublicPhone{ID: p.ID, Name: p.Name, CreatedAt: p.CreatedAt, LastSeen: p.LastSeen})
+	}
+	return out
+}
+
+func (m *memTrust) Revoke(idOrName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept := m.phones[:0]
+	n := 0
+	for _, p := range m.phones {
+		if p.ID == idOrName || p.Name == idOrName {
+			n++
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if n == 0 {
+		return trust.ErrNotFound
+	}
+	m.phones = kept
+	return nil
+}
+
+func (m *memTrust) Count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.phones)
+}
+
+func (m *memTrust) Touch(phoneID string, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, p := range m.phones {
+		if p.ID == phoneID {
+			m.phones[i].LastSeen = now
+			return
+		}
+	}
 }
 
 func TestHealth(t *testing.T) {
@@ -856,5 +941,253 @@ func TestReconnectRateLimit(t *testing.T) {
 	}
 	if lastPhone.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 after 20/min/phone, got %d: %s", lastPhone.Code, lastPhone.Body.String())
+	}
+}
+
+func TestPairAutoApproveIncludesPairingSecretWhenStoreConfigured(t *testing.T) {
+	session, now := newTestSession(t)
+	store := &memTrust{}
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		Media:       &recordingMedia{},
+		AutoApprove: true,
+		Trust:       store,
+	}).Handler()
+
+	recorder := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := mustJSONMap(t, recorder.Body.Bytes())
+	secret, _ := body["pairing_secret"].(string)
+	if secret == "" {
+		t.Fatalf("pair 202 must include pairing_secret when store is configured: %s", recorder.Body.String())
+	}
+	if store.Count() != 1 {
+		t.Fatalf("expected persisted phone, got %d", store.Count())
+	}
+	if _, ok := store.LookupBySecret("phone-1", secret); !ok {
+		t.Fatal("stored secret should match the 202 body")
+	}
+}
+
+func TestReconnectPairingSecretPath(t *testing.T) {
+	session, now := newTestSession(t)
+	store := &memTrust{}
+	secret, err := store.Upsert("phone-1", "Pixel", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	media := &recordingMedia{}
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now.Add(pairing.DefaultTTL + time.Minute)},
+		Media:   media,
+		Trust:   store,
+	}).Handler()
+
+	// QR is unused and past TTL; pairing_secret must still work.
+	recorder := postJSON(server, "/reconnect", reconnectRequest{
+		Phone:         pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:       51000,
+		SSRC:          99,
+		PairingSecret: secret,
+		Video:         &pairing.VideoProfile{Width: 640, Height: 360, FPS: 30},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var got reconnectResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if !got.Approved || got.ResumeToken == "" {
+		t.Fatalf("expected minted resume_token, got %#v", got)
+	}
+	firstToken := got.ResumeToken
+	if !session.IsApproved() {
+		t.Fatal("ApproveTrusted should approve")
+	}
+	if _, ok := session.PendingPhone(); ok {
+		t.Fatal("trusted reconnect must not leave PendingPhone")
+	}
+
+	// leftover QR is consumed
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusUnauthorized {
+		t.Fatalf("leftover QR should be consumed, got %d: %s", pairRec.Code, pairRec.Body.String())
+	}
+
+	// same-id rebind echoes the token
+	again := postJSON(server, "/reconnect", reconnectRequest{
+		Phone:         pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:       52000,
+		SSRC:          100,
+		PairingSecret: secret,
+	})
+	if again.Code != http.StatusOK {
+		t.Fatalf("same-id rebind: %d %s", again.Code, again.Body.String())
+	}
+	if mustJSONMap(t, again.Body.Bytes())["resume_token"] != firstToken {
+		t.Fatal("same-id rebind must echo the live resume_token")
+	}
+}
+
+func TestReconnectResumeTokenPreferredOverPairingSecret(t *testing.T) {
+	session, now := newTestSession(t)
+	store := &memTrust{}
+	secret, err := store.Upsert("phone-1", "Pixel", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		Media:       &recordingMedia{},
+		AutoApprove: true,
+		Trust:       store,
+	}).Handler()
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	resume := mustJSONMap(t, pairRec.Body.Bytes())["resume_token"].(string)
+
+	recorder := postJSON(server, "/reconnect", reconnectRequest{
+		Phone:         pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:       51000,
+		SSRC:          99,
+		ResumeToken:   resume,
+		PairingSecret: secret,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if mustJSONMap(t, recorder.Body.Bytes())["resume_token"] != resume {
+		t.Fatal("resume_token path must be preferred and echo the live token")
+	}
+}
+
+func TestReconnectPairingSecretDifferentPhoneConflict(t *testing.T) {
+	session, now := newTestSession(t)
+	store := &memTrust{}
+	if _, err := store.Upsert("phone-1", "Pixel", now); err != nil {
+		t.Fatal(err)
+	}
+	secret2, err := store.Upsert("phone-2", "Other", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now.Add(time.Second)},
+		Media:       &recordingMedia{},
+		AutoApprove: true,
+		Trust:       store,
+	}).Handler()
+	postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+
+	recorder := postJSON(server, "/reconnect", reconnectRequest{
+		Phone:         pairing.Phone{ID: "phone-2", Name: "Other"},
+		RTPPort:       51000,
+		SSRC:          99,
+		PairingSecret: secret2,
+	})
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestTrustListOmitsSecretsAndRejectsNonLoopback(t *testing.T) {
+	session, now := newTestSession(t)
+	store := &memTrust{}
+	if _, err := store.Upsert("phone-1", "Pixel", now); err != nil {
+		t.Fatal(err)
+	}
+	server := New(Config{Session: session, Clock: fakeClock{now: now}, Trust: store}).Handler()
+
+	remote := httptest.NewRequest(http.MethodGet, "/trust", nil)
+	remote.RemoteAddr = "192.168.1.50:9"
+	off := httptest.NewRecorder()
+	server.ServeHTTP(off, remote)
+	if off.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 off-loopback, got %d: %s", off.Code, off.Body.String())
+	}
+
+	local := httptest.NewRequest(http.MethodGet, "/trust", nil)
+	local.RemoteAddr = "127.0.0.1:9"
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, local)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := mustJSONMap(t, rec.Body.Bytes())
+	raw, _ := json.Marshal(body)
+	if strings.Contains(string(raw), "secret") || strings.Contains(string(raw), "pairing") {
+		t.Fatalf("GET /trust must not include secrets: %s", raw)
+	}
+	phones, _ := body["phones"].([]any)
+	if len(phones) != 1 {
+		t.Fatalf("expected 1 phone, got %#v", body)
+	}
+	entry := phones[0].(map[string]any)
+	if entry["id"] != "phone-1" || entry["name"] != "Pixel" {
+		t.Fatalf("unexpected entry %#v", entry)
+	}
+	if _, ok := entry["secret"]; ok {
+		t.Fatal("secret field must be absent")
+	}
+}
+
+func TestTrustDeleteLoopbackOnly(t *testing.T) {
+	session, now := newTestSession(t)
+	store := &memTrust{}
+	if _, err := store.Upsert("phone-1", "Pixel", now); err != nil {
+		t.Fatal(err)
+	}
+	server := New(Config{Session: session, Clock: fakeClock{now: now}, Trust: store}).Handler()
+
+	off := httptest.NewRequest(http.MethodDelete, "/trust/phone-1", nil)
+	off.RemoteAddr = "192.168.1.50:9"
+	offRec := httptest.NewRecorder()
+	server.ServeHTTP(offRec, off)
+	if offRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", offRec.Code)
+	}
+	if store.Count() != 1 {
+		t.Fatal("off-loopback delete must not revoke")
+	}
+
+	local := httptest.NewRequest(http.MethodDelete, "/trust/phone-1", nil)
+	local.RemoteAddr = "127.0.0.1:9"
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, local)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if store.Count() != 0 {
+		t.Fatal("loopback delete should revoke")
 	}
 }

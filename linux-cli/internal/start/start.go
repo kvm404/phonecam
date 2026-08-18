@@ -19,6 +19,7 @@ import (
 	"github.com/kvm404/phonecam/linux-cli/internal/qrcode"
 	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
 	"github.com/kvm404/phonecam/linux-cli/internal/session"
+	"github.com/kvm404/phonecam/linux-cli/internal/trust"
 	"github.com/kvm404/phonecam/linux-cli/internal/v4l2"
 )
 
@@ -212,6 +213,9 @@ type Config struct {
 	// AutoApprove approves the first phone to pair without prompting. It is
 	// intended for automation and headless use.
 	AutoApprove bool
+	// Trust is the persistent pairing store. nil means --no-trust for this
+	// process: do not read or write trusted.json.
+	Trust *trust.Store
 }
 
 type Runtime struct {
@@ -285,8 +289,13 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 		now = time.Now().UTC()
 	}
 
+	laptopID := ""
+	if config.Trust != nil {
+		laptopID = config.Trust.LaptopID()
+	}
 	pairSession, err := pairing.New(pairing.Config{
 		LaptopName: hostname,
+		LaptopID:   laptopID,
 		ControlURL: fmt.Sprintf("http://%s:%d", host, controlPort),
 		RTPHost:    host,
 		RTPPort:    rtpPort,
@@ -317,11 +326,16 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 	if attachRuntimeMedia != nil {
 		attachRuntimeMedia(media)
 	}
+	var trustStore control.TrustStore
+	if config.Trust != nil {
+		trustStore = config.Trust
+	}
 	server := &http.Server{
 		Handler: control.New(control.Config{
 			Session:     pairSession,
 			Media:       media,
 			AutoApprove: config.AutoApprove,
+			Trust:       trustStore,
 		}).Handler(),
 	}
 	errCh := make(chan error, 1)
@@ -338,7 +352,11 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 		gateErr <- gate.Run(recvCtx)
 	}()
 
-	writeStartOutput(stdout, virtualCamera, pairSession)
+	trustedCount := 0
+	if config.Trust != nil {
+		trustedCount = config.Trust.Count()
+	}
+	writeStartOutput(stdout, virtualCamera, pairSession, trustedCount)
 
 	shutdownServer := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -371,6 +389,7 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 						pairSession.Invalidate()
 						return err
 					}
+					persistApproved(pairSession, config.Trust, time.Now().UTC())
 					fmt.Fprintf(stdout, "Auto-approved phone %q.\n", phone.Name)
 					autoApprovedHere = true
 					continue
@@ -409,6 +428,7 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 					pairSession.Invalidate()
 					return err
 				}
+				persistApproved(pairSession, config.Trust, time.Now().UTC())
 				// Approved: the loop condition now exits and start proceeds.
 			default:
 				fmt.Fprintln(stdout, "Pairing denied.")
@@ -672,7 +692,22 @@ func gateRunError(ctx context.Context, err error) error {
 	return fmt.Errorf("rtp gate: %w", err)
 }
 
-func writeStartOutput(w io.Writer, virtualCamera string, pairSession *pairing.Session) {
+func persistApproved(session *pairing.Session, store *trust.Store, now time.Time) {
+	if store == nil || session == nil {
+		return
+	}
+	phone := session.ApprovedPhone()
+	if phone.ID == "" {
+		return
+	}
+	secret, err := store.Upsert(phone.ID, phone.Name, now)
+	if err != nil || secret == "" {
+		return
+	}
+	session.SetPairingSecret(secret)
+}
+
+func writeStartOutput(w io.Writer, virtualCamera string, pairSession *pairing.Session, trustedCount int) {
 	payload := pairSession.Payload()
 	payloadJSON, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -686,7 +721,12 @@ func writeStartOutput(w io.Writer, virtualCamera string, pairSession *pairing.Se
 	fmt.Fprintln(w, "PhoneCam")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Virtual camera: %s\n", virtualCamera)
-	fmt.Fprintln(w, "Status: Waiting for phone")
+	if trustedCount > 0 {
+		fmt.Fprintln(w, "Status: Waiting for phone (trusted reconnect allowed)")
+		fmt.Fprintln(w, "Trusted phones can tap Reconnect")
+	} else {
+		fmt.Fprintln(w, "Status: Waiting for phone")
+	}
 	fmt.Fprintf(w, "Control server: %s\n", payload.Control)
 	fmt.Fprintf(w, "RTP endpoint: %s\n", payload.RTP)
 	fmt.Fprintln(w)

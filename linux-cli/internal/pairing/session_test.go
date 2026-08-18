@@ -37,6 +37,31 @@ func TestNewBuildsVersionedPayload(t *testing.T) {
 	}
 }
 
+func TestPayloadJSONIncludesLaptopIDNotPairingSecret(t *testing.T) {
+	session := newTestSession(t, Config{LaptopID: "laptop-abc"})
+
+	data, err := session.PayloadJSON()
+	if err != nil {
+		t.Fatalf("PayloadJSON failed: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("payload JSON: %v", err)
+	}
+	if raw["laptop_id"] != "laptop-abc" {
+		t.Fatalf("expected laptop_id in payload, got %#v", raw)
+	}
+	if raw["v"] != float64(ProtocolVersion) {
+		t.Fatalf("protocol version must stay 1, got %#v", raw["v"])
+	}
+	if _, ok := raw["pairing_secret"]; ok {
+		t.Fatal("PayloadJSON must not include pairing_secret")
+	}
+	if _, ok := raw["resume_token"]; ok {
+		t.Fatal("PayloadJSON must not include resume_token")
+	}
+}
+
 func TestPayloadJSONIsScannableShape(t *testing.T) {
 	session := newTestSession(t, Config{})
 
@@ -174,10 +199,105 @@ func TestTakeSecretsIsOneShotAndOmittedFromPayload(t *testing.T) {
 		t.Fatalf("expected one-shot resume secret, got resume=%q ok=%v", resume, ok)
 	}
 	if pairing != "" {
-		t.Fatalf("pairing secret must be empty without a trust store, got %q", pairing)
+		t.Fatalf("pairing secret must be empty until SetPairingSecret, got %q", pairing)
+	}
+
+	session.SetPairingSecret("stored-pairing-secret")
+	// already taken; setting a secret later must not re-open the one-shot
+	if _, _, ok := session.TakeSecrets(); ok {
+		t.Fatal("TakeSecrets must stay one-shot after SetPairingSecret")
 	}
 	if _, _, ok := session.TakeSecrets(); ok {
 		t.Fatal("TakeSecrets must be one-shot")
+	}
+}
+
+func TestTakeSecretsReturnsPairingSecretWhenSet(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now, LaptopID: "lid"})
+	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	session.SetPairingSecret("pairing-secret-value")
+	resume, pairing, ok := session.TakeSecrets()
+	if !ok || resume == "" || pairing != "pairing-secret-value" {
+		t.Fatalf("expected both secrets, got resume=%q pairing=%q ok=%v", resume, pairing, ok)
+	}
+}
+
+func TestApproveTrustedIgnoresTTLAndDoesNotInvalidate(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	expired := now.Add(DefaultTTL + time.Minute)
+	source := RTPSource{IP: net.ParseIP("192.168.1.60"), Port: 51000, SSRC: 99}
+	phone := Phone{ID: "phone-1", Name: "Pixel"}
+	video := VideoProfile{Width: 640, Height: 360, FPS: 30}
+
+	if err := session.ApproveTrusted(phone, source, &video); err != nil {
+		t.Fatalf("ApproveTrusted after QR expiry must succeed, got %v", err)
+	}
+	if !session.IsApproved() {
+		t.Fatal("expected approved session")
+	}
+	if _, ok := session.PendingPhone(); ok {
+		t.Fatal("ApproveTrusted must not leave a pending phone")
+	}
+	if got := session.NegotiatedVideo(); got != video {
+		t.Fatalf("expected negotiated video, got %#v", got)
+	}
+	got, ok := session.ApprovedSource()
+	if !ok || !got.IP.Equal(source.IP) || got.Port != source.Port || got.SSRC != source.SSRC {
+		t.Fatalf("expected pinned source, got %#v", got)
+	}
+	if err := session.ValidateRTPSource(source); err != nil {
+		t.Fatalf("rtpSource should be bound: %v", err)
+	}
+
+	token := session.Payload().Token
+	if err := session.ConsumeToken(tokenRequest(session, token), expired); !errors.Is(err, ErrTokenConsumed) {
+		t.Fatalf("leftover QR must be consumed, got %v", err)
+	}
+	if !session.IsApproved() {
+		t.Fatal("ApproveTrusted must not Invalidate the live session")
+	}
+	live := session.ResumeToken()
+	if live == "" {
+		t.Fatal("expected minted resume_token")
+	}
+
+	// Same id rebind echoes the token and does not mint.
+	next := RTPSource{IP: net.ParseIP("192.168.1.61"), Port: 52000, SSRC: 100}
+	if err := session.ApproveTrusted(phone, next, nil); err != nil {
+		t.Fatalf("same-id ApproveTrusted: %v", err)
+	}
+	if session.ResumeToken() != live {
+		t.Fatal("same-id rebind must echo the existing resume_token")
+	}
+	rebound, ok := session.ApprovedSource()
+	if !ok || rebound.Port != 52000 || rebound.SSRC != 100 {
+		t.Fatalf("expected rebound source, got %#v", rebound)
+	}
+
+	other := Phone{ID: "phone-2", Name: "Other"}
+	if err := session.ApproveTrusted(other, next, nil); !errors.Is(err, ErrDifferentPhone) {
+		t.Fatalf("expected ErrDifferentPhone, got %v", err)
+	}
+}
+
+func TestApproveTrustedDoesNotRotatePairingSecret(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	session.SetPairingSecret("keep-me")
+	source := RTPSource{IP: net.ParseIP("192.168.1.60"), Port: 51000, SSRC: 99}
+	if err := session.ApproveTrusted(Phone{ID: "p", Name: "N"}, source, nil); err != nil {
+		t.Fatalf("ApproveTrusted: %v", err)
+	}
+	_, pairing, ok := session.TakeSecrets()
+	if !ok || pairing != "keep-me" {
+		t.Fatalf("pairing_secret must not rotate on ApproveTrusted, got %q ok=%v", pairing, ok)
 	}
 }
 
@@ -455,6 +575,9 @@ func newTestSession(t *testing.T, override Config) *Session {
 	}
 	if override.LaptopName != "" {
 		config.LaptopName = override.LaptopName
+	}
+	if override.LaptopID != "" {
+		config.LaptopID = override.LaptopID
 	}
 	if override.ControlURL != "" {
 		config.ControlURL = override.ControlURL

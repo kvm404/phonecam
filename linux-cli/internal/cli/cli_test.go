@@ -3,10 +3,14 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/start"
+	"github.com/kvm404/phonecam/linux-cli/internal/trust"
 )
 
 type fakeSystem struct {
@@ -45,6 +49,10 @@ func (f fakeSystem) ReadFile(path string) ([]byte, error) {
 
 func (f fakeSystem) Getenv(name string) string {
 	return f.environment[name]
+}
+
+func (f fakeSystem) FileMode(path string) (os.FileMode, error) {
+	return 0, os.ErrNotExist
 }
 
 func TestRunShowsHelpWithoutArgs(t *testing.T) {
@@ -96,7 +104,7 @@ func TestRunDoctorReturnsFailureCodeWhenChecksFail(t *testing.T) {
 
 func TestParseStartFlagsDefaultsToFixedPorts(t *testing.T) {
 	var stderr bytes.Buffer
-	control, rtp, _, code, ok := parseStartFlags(nil, &stderr)
+	control, rtp, _, _, code, ok := parseStartFlags(nil, &stderr)
 	if !ok {
 		t.Fatalf("expected ok, got code %d", code)
 	}
@@ -113,7 +121,7 @@ func TestParseStartFlagsDefaultsToFixedPorts(t *testing.T) {
 
 func TestParseStartFlagsOverridesPorts(t *testing.T) {
 	var stderr bytes.Buffer
-	control, rtp, _, _, ok := parseStartFlags([]string{"--control-port", "9000", "--rtp-port", "9001"}, &stderr)
+	control, rtp, _, _, _, ok := parseStartFlags([]string{"--control-port", "9000", "--rtp-port", "9001"}, &stderr)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -125,15 +133,18 @@ func TestParseStartFlagsOverridesPorts(t *testing.T) {
 func TestParseStartFlagsApprovalDefaults(t *testing.T) {
 	var stderr bytes.Buffer
 
-	_, _, auto, _, ok := parseStartFlags(nil, &stderr)
+	_, _, auto, noTrust, _, ok := parseStartFlags(nil, &stderr)
 	if !ok {
 		t.Fatal("expected ok")
 	}
 	if !auto {
 		t.Fatal("expected auto-approve to be the default")
 	}
+	if noTrust {
+		t.Fatal("expected trust store to be used by default")
+	}
 
-	_, _, auto, _, ok = parseStartFlags([]string{"--require-approval"}, &stderr)
+	_, _, auto, _, _, ok = parseStartFlags([]string{"--require-approval"}, &stderr)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -144,7 +155,7 @@ func TestParseStartFlagsApprovalDefaults(t *testing.T) {
 
 func TestParseStartFlagsZeroMeansEphemeral(t *testing.T) {
 	var stderr bytes.Buffer
-	control, rtp, _, _, ok := parseStartFlags([]string{"--control-port=0", "--rtp-port=0"}, &stderr)
+	control, rtp, _, _, _, ok := parseStartFlags([]string{"--control-port=0", "--rtp-port=0"}, &stderr)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -155,7 +166,7 @@ func TestParseStartFlagsZeroMeansEphemeral(t *testing.T) {
 
 func TestParseStartFlagsUnknownFlagFails(t *testing.T) {
 	var stderr bytes.Buffer
-	_, _, _, code, ok := parseStartFlags([]string{"--bogus"}, &stderr)
+	_, _, _, _, code, ok := parseStartFlags([]string{"--bogus"}, &stderr)
 	if ok {
 		t.Fatal("expected parse failure")
 	}
@@ -178,11 +189,65 @@ func TestRunStartUnknownFlagExits2(t *testing.T) {
 	}
 }
 
+func TestRunTrustListAndRevoke(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := Run(nil, fakeSystem{}, []string{"trust", "list"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("list empty: %d %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No trusted phones") {
+		t.Fatalf("expected empty list, got %q", stdout.String())
+	}
+
+	store, err := trust.Open(nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Upsert("id-1", "Pixel", time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	code = Run(nil, fakeSystem{}, []string{"trust", "list"}, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "Pixel") {
+		t.Fatalf("list: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	code = Run(nil, fakeSystem{}, []string{"trust", "revoke", "Pixel"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("revoke: %d %s", code, stderr.String())
+	}
+	stdout.Reset()
+	code = Run(nil, fakeSystem{}, []string{"trust", "list"}, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), "No trusted phones") {
+		t.Fatalf("expected revoked, got %q", stdout.String())
+	}
+}
+
+func TestParseStartFlagsNoTrust(t *testing.T) {
+	var stderr bytes.Buffer
+	_, _, _, noTrust, _, ok := parseStartFlags([]string{"--no-trust"}, &stderr)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if !noTrust {
+		t.Fatal("expected --no-trust")
+	}
+}
+
 func TestHelpMentionsStartPortFlags(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	Run(nil, fakeSystem{}, []string{"help"}, &stdout, &stderr)
 	if !strings.Contains(stdout.String(), "--control-port") || !strings.Contains(stdout.String(), "--rtp-port") {
 		t.Fatalf("expected help to mention port flags, got:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "trust") || !strings.Contains(stdout.String(), "--no-trust") {
+		t.Fatalf("expected help to mention trust, got:\n%s", stdout.String())
 	}
 }
 

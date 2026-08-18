@@ -38,6 +38,20 @@ class PairingPayloadTest {
         assertEquals(1280, payload.video.width)
         assertEquals(720, payload.video.height)
         assertEquals(30, payload.video.fps)
+        assertEquals("", payload.laptopId)
+    }
+
+    @Test
+    fun `parses optional laptop_id`() {
+        val json = """
+            {"v":1,"name":"laptop","laptop_id":"lid-xyz","control":"http://192.168.1.5:8765",
+             "rtp":"192.168.1.5:5004","session":"sess-123","token":"tok-abc",
+             "expires":"2999-01-01T00:00:00Z","transport":"rtp-h264",
+             "video":{"width":1280,"height":720,"fps":30}}
+        """.trimIndent()
+        val payload = PairingPayload.parse(json)
+        assertEquals("lid-xyz", payload.laptopId)
+        assertEquals(1, payload.version)
     }
 
     @Test

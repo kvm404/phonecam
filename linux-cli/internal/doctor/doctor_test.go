@@ -3,6 +3,7 @@ package doctor
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ type fakeSystem struct {
 	writable        map[string]bool
 	files           map[string]string
 	environment     map[string]string
+	modes           map[string]os.FileMode
 }
 
 func (f fakeSystem) LookPath(name string) (string, error) {
@@ -53,6 +55,15 @@ func (f fakeSystem) ReadFile(path string) ([]byte, error) {
 
 func (f fakeSystem) Getenv(name string) string {
 	return f.environment[name]
+}
+
+func (f fakeSystem) FileMode(path string) (os.FileMode, error) {
+	if f.modes != nil {
+		if mode, ok := f.modes[path]; ok {
+			return mode, nil
+		}
+	}
+	return 0, os.ErrNotExist
 }
 
 func TestDoctorReportsReadyWhenCoreChecksPass(t *testing.T) {
@@ -320,7 +331,44 @@ func readySystem(overrides fakeSystem) fakeSystem {
 		}
 	}
 	if overrides.environment != nil {
-		base.environment = overrides.environment
+		for key, value := range overrides.environment {
+			base.environment[key] = value
+		}
+	}
+	if overrides.modes != nil {
+		base.modes = overrides.modes
 	}
 	return base
+}
+
+func TestLANPrivacyMentionsUnencryptedRTPAndLocalTrust(t *testing.T) {
+	report := Run(readySystem(fakeSystem{}))
+	check := findCheck(t, report, "LAN privacy")
+	if check.Status != StatusInfo {
+		t.Fatalf("expected INFO, got %s", check.Status)
+	}
+	if !strings.Contains(check.Message, "without payload encryption") {
+		t.Fatalf("LAN privacy must stay honest about unencrypted RTP, got %q", check.Message)
+	}
+	if !strings.Contains(check.Message, "trusted pairing does not encrypt RTP") {
+		t.Fatalf("expected local trust disclosure, got %q", check.Message)
+	}
+}
+
+func TestTrustFileWarnsWhenModeIsNot0600(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		environment: map[string]string{
+			"XDG_CONFIG_HOME": "/xdg",
+		},
+		modes: map[string]os.FileMode{
+			"/xdg/phonecam/trusted.json": 0o644,
+		},
+	}))
+	check := findCheck(t, report, "Trust file")
+	if check.Status != StatusWarn {
+		t.Fatalf("expected WARN for 0644 trust file, got %s (%s)", check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "0644") {
+		t.Fatalf("expected mode in message, got %q", check.Message)
+	}
 }

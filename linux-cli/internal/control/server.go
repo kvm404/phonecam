@@ -12,6 +12,7 @@ import (
 
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
 	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
+	"github.com/kvm404/phonecam/linux-cli/internal/trust"
 )
 
 // Media lets the control server pin the RTP gate and read its counters.
@@ -36,6 +37,7 @@ type Server struct {
 	session     *pairing.Session
 	clock       Clock
 	media       Media
+	trust       TrustStore
 	mux         *http.ServeMux
 	autoApprove bool
 	limiter     *reconnectLimiter
@@ -43,11 +45,22 @@ type Server struct {
 	camera      string
 }
 
+// TrustStore is the persistent phone list. nil means --no-trust.
+type TrustStore interface {
+	LookupBySecret(phoneID, secret string) (trust.Phone, bool)
+	Upsert(id, name string, now time.Time) (secret string, err error)
+	List() []trust.PublicPhone
+	Revoke(idOrName string) error
+	Count() int
+	Touch(phoneID string, now time.Time)
+}
+
 type Config struct {
 	Session     *pairing.Session
 	Clock       Clock
 	Media       Media
 	AutoApprove bool
+	Trust       TrustStore
 }
 
 type pairRequest struct {
@@ -71,10 +84,11 @@ type reconnectRequest struct {
 }
 
 type pairResponse struct {
-	OK          bool   `json:"ok"`
-	Approved    bool   `json:"approved"`
-	Session     string `json:"session,omitempty"`
-	ResumeToken string `json:"resume_token,omitempty"`
+	OK            bool   `json:"ok"`
+	Approved      bool   `json:"approved"`
+	Session       string `json:"session,omitempty"`
+	ResumeToken   string `json:"resume_token,omitempty"`
+	PairingSecret string `json:"pairing_secret,omitempty"`
 }
 
 type reconnectResponse struct {
@@ -106,6 +120,7 @@ type statusResponse struct {
 	ReceiverRestarts int                   `json:"receiver_restarts,omitempty"`
 	RequestKeyframe  bool                  `json:"request_keyframe,omitempty"`
 	ReconnectReady   bool                  `json:"reconnect_ready,omitempty"`
+	TrustedCount     int                   `json:"trusted_count,omitempty"`
 	ResumeToken      string                `json:"resume_token,omitempty"`
 	PairingSecret    string                `json:"pairing_secret,omitempty"`
 }
@@ -124,6 +139,7 @@ func New(config Config) *Server {
 		session:     config.Session,
 		clock:       clock,
 		media:       config.Media,
+		trust:       config.Trust,
 		mux:         http.NewServeMux(),
 		autoApprove: config.AutoApprove,
 		limiter:     newReconnectLimiter(),
@@ -143,6 +159,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /approve", s.handleApprove)
 	s.mux.HandleFunc("POST /reconnect", s.handleReconnect)
 	s.mux.HandleFunc("GET /status", s.handleStatus)
+	s.mux.HandleFunc("GET /trust", s.handleTrustList)
+	s.mux.HandleFunc("DELETE /trust/{id}", s.handleTrustDelete)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -207,10 +225,12 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		writePairingError(w, err)
 		return
 	}
+	s.persistTrust(request.Phone)
 	s.pinMedia()
-	resume, _, _ := s.session.TakeSecrets()
+	resume, secret, _ := s.session.TakeSecrets()
 	resp.Approved = true
 	resp.ResumeToken = resume
+	resp.PairingSecret = secret
 	writeJSON(w, http.StatusAccepted, resp)
 }
 
@@ -234,9 +254,13 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	already := s.session.IsApproved()
 	if err := s.session.Approve(s.clock.Now()); err != nil {
 		writePairingError(w, err)
 		return
+	}
+	if !already {
+		s.persistTrust(s.session.ApprovedPhone())
 	}
 
 	writeJSON(w, http.StatusOK, statusResponse{
@@ -269,37 +293,56 @@ func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// pairing_secret is ignored this PR (no trust store). Resume is the only auth.
-	if !s.session.MatchResumeToken(request.ResumeToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-
-	approved := s.session.ApprovedPhone()
-	if approved.ID != request.Phone.ID {
-		writeError(w, http.StatusConflict, pairing.ErrDifferentPhone.Error())
-		return
-	}
-
-	if request.Video != nil {
-		if err := s.session.SetNegotiatedVideo(*request.Video); err != nil {
-			writePairingError(w, err)
-			return
-		}
-	}
-
 	source := pairing.RTPSource{
 		IP:   remoteIP,
 		Port: request.RTPPort,
 		SSRC: request.SSRC,
 	}
-	if err := s.session.RebindRTPSource(source); err != nil {
-		writePairingError(w, err)
+
+	if s.session.MatchResumeToken(request.ResumeToken) {
+		approved := s.session.ApprovedPhone()
+		if approved.ID != request.Phone.ID {
+			writeError(w, http.StatusConflict, pairing.ErrDifferentPhone.Error())
+			return
+		}
+		if request.Video != nil {
+			if err := s.session.SetNegotiatedVideo(*request.Video); err != nil {
+				writePairingError(w, err)
+				return
+			}
+		}
+		if err := s.session.RebindRTPSource(source); err != nil {
+			writePairingError(w, err)
+			return
+		}
+		s.storeCamera(request.Camera)
+		s.pinMedia()
+		s.writeReconnectOK(w)
 		return
 	}
-	s.storeCamera(request.Camera)
-	s.pinMedia()
 
+	if s.trust != nil {
+		if _, ok := s.trust.LookupBySecret(request.Phone.ID, request.PairingSecret); ok {
+			if err := s.session.ApproveTrusted(request.Phone, source, request.Video); err != nil {
+				if errors.Is(err, pairing.ErrDifferentPhone) {
+					writeError(w, http.StatusConflict, pairing.ErrDifferentPhone.Error())
+					return
+				}
+				writePairingError(w, err)
+				return
+			}
+			s.trust.Touch(request.Phone.ID, s.clock.Now())
+			s.storeCamera(request.Camera)
+			s.pinMedia()
+			s.writeReconnectOK(w)
+			return
+		}
+	}
+
+	writeError(w, http.StatusUnauthorized, "unauthorized")
+}
+
+func (s *Server) writeReconnectOK(w http.ResponseWriter) {
 	payload := s.session.Payload()
 	writeJSON(w, http.StatusOK, reconnectResponse{
 		OK:          true,
@@ -367,7 +410,60 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			body["pairing_secret"] = secret
 		}
 	}
+	if s.trust != nil {
+		if n := s.trust.Count(); n > 0 {
+			body["trusted_count"] = n
+		}
+	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) persistTrust(phone pairing.Phone) {
+	if s.trust == nil || phone.ID == "" {
+		return
+	}
+	secret, err := s.trust.Upsert(phone.ID, phone.Name, s.clock.Now())
+	if err != nil || secret == "" {
+		return
+	}
+	s.session.SetPairingSecret(secret)
+}
+
+func (s *Server) handleTrustList(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, "trust list is only available locally")
+		return
+	}
+	phones := []trust.PublicPhone{}
+	if s.trust != nil {
+		phones = s.trust.List()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"phones": phones})
+}
+
+func (s *Server) handleTrustDelete(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, "trust revoke is only available locally")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing phone id")
+		return
+	}
+	if s.trust == nil {
+		writeError(w, http.StatusNotFound, trust.ErrNotFound.Error())
+		return
+	}
+	if err := s.trust.Revoke(id); err != nil {
+		if errors.Is(err, trust.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not revoke")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) pinMedia() {
