@@ -19,6 +19,14 @@ This puts `phonecam` in `$(go env GOPATH)/bin` — add that to your `PATH` if it
 isn't already. (Prefer not to use Go? Grab a prebuilt binary from
 [Releases](https://github.com/kvm404/phonecam/releases).)
 
+Testers of the current pre-release should install the **`v0.2.0-rc.1`** CLI and
+APK from that release, not `@latest` (Go ignores pre-release tags for
+`@latest`):
+
+```sh
+go install github.com/kvm404/phonecam/linux-cli/cmd/phonecam@v0.2.0-rc.1
+```
+
 Then install the Linux dependencies (GStreamer, `v4l2loopback`) and check your
 setup:
 
@@ -50,10 +58,12 @@ phonecam start      # on the laptop — shows a QR code
 
 ## Status
 
-**v0.1, early.** Verified on Arch Linux + one vivo phone (Android 10+); other
-distros and phones are untested — reports welcome. Video only for now (no audio),
-and the LAN stream is **unencrypted**, so use it on trusted networks only. There
-is no account, cloud, or relay — video goes straight from phone to laptop.
+**v0.2.0-rc.1, early.** Working Wi-Fi webcam with QR pairing, trusted reconnect,
+and in-session recovery. Verified on Arch Linux + one vivo phone (Android 10+);
+other distros and phones are untested — reports welcome. Video only for now (no
+audio), and the LAN stream is **unencrypted**, so use it on trusted networks
+only. There is no account, cloud, or relay — video goes straight from phone to
+laptop.
 
 ## Docs & License
 
