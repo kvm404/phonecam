@@ -37,6 +37,7 @@ class PairingController(
     private val video: VideoProfile,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val pollIntervalMs: Long = 1000L,
+    private val camera: String? = null,
 ) {
     private val _state = MutableStateFlow<PairingState>(PairingState.Idle)
     val state: StateFlow<PairingState> = _state.asStateFlow()
@@ -52,7 +53,7 @@ class PairingController(
         }
 
         _state.value = PairingState.Pairing
-        when (val result = client.pair(payload, phone, rtp.sourcePort, rtp.ssrc, video)) {
+        when (val result = client.pair(payload, phone, rtp.sourcePort, rtp.ssrc, video, camera)) {
             is PairResult.Failure -> {
                 _state.value = PairingState.Failed(result.message)
                 return

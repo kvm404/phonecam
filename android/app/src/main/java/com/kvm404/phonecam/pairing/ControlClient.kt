@@ -75,6 +75,7 @@ interface ControlClient {
         rtpPort: Int,
         ssrc: Long,
         video: VideoProfile,
+        camera: String? = null,
     ): PairResult
 
     fun status(payload: PairingPayload): StatusResult
@@ -103,6 +104,7 @@ class HttpControlClient(
         rtpPort: Int,
         ssrc: Long,
         video: VideoProfile,
+        camera: String?,
     ): PairResult {
         val body = JSONObject().apply {
             put("session", payload.session)
@@ -120,6 +122,7 @@ class HttpControlClient(
                 put("height", video.height)
                 put("fps", video.fps)
             })
+            camera?.takeIf { it.isNotBlank() }?.let { put("camera", it) }
         }.toString()
 
         return try {

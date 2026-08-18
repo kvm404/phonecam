@@ -36,6 +36,7 @@ class PairingControllerTest {
         var pairCalls = 0
         var statusCalls = 0
         var lastVideo: VideoProfile? = null
+        var lastCamera: String? = null
 
         override fun pair(
             payload: PairingPayload,
@@ -43,9 +44,11 @@ class PairingControllerTest {
             rtpPort: Int,
             ssrc: Long,
             video: VideoProfile,
+            camera: String?,
         ): PairResult {
             pairCalls++
             lastVideo = video
+            lastCamera = camera
             return pairResult
         }
 
@@ -157,5 +160,20 @@ class PairingControllerTest {
         assertEquals(PairingController.EXPIRED_MESSAGE, (state as PairingState.Failed).message)
         assertEquals(0, client.pairCalls)
         assertEquals(0, client.statusCalls)
+    }
+
+    @Test
+    fun `pair forwards camera so status can echo it from first handshake`() = runTest {
+        val client = FakeControlClient(
+            pairResult = PairResult.Accepted(approved = true, session = "sess-123"),
+        )
+        val controller = PairingController(
+            client, phone, rtp, video, clock = { 0L }, camera = "front",
+        )
+
+        controller.run(futurePayload)
+
+        assertTrue(controller.state.value is PairingState.Paired)
+        assertEquals("front", client.lastCamera)
     }
 }

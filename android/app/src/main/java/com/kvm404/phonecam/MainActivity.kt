@@ -18,6 +18,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -46,6 +47,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.kvm404.phonecam.databinding.ActivityMainBinding
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.kvm404.phonecam.pairing.CameraFacing
 import com.kvm404.phonecam.pairing.HomeReconnect
 import com.kvm404.phonecam.pairing.HomeReconnectResult
 import com.kvm404.phonecam.pairing.HttpControlClient
@@ -204,6 +206,16 @@ class MainActivity : AppCompatActivity() {
 
         override fun onStreamHealth(health: StreamHealth) {
             runOnUiThread { updateLiveUi() }
+        }
+
+        override fun onCameraReady() {
+            runOnUiThread { updateLiveUi() }
+        }
+
+        override fun onNoOtherCamera() {
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, R.string.no_other_camera, Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -459,6 +471,7 @@ class MainActivity : AppCompatActivity() {
                         phone = phoneIdentity,
                         rtp = rtp,
                         video = committed,
+                        camera = persistedCameraFacing(),
                     )
                 }
                 when (result) {
@@ -751,8 +764,13 @@ class MainActivity : AppCompatActivity() {
         pairingJob = lifecycleScope.launch {
             val rtp = withContext(Dispatchers.IO) { RtpIdentity.create() }
             rtpIdentity = rtp
-            val controller =
-                PairingController(HttpControlClient(), phoneIdentity, rtp, committed)
+            val controller = PairingController(
+                HttpControlClient(),
+                phoneIdentity,
+                rtp,
+                committed,
+                camera = persistedCameraFacing(),
+            )
             launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     controller.state.collect { state ->
@@ -874,12 +892,13 @@ class MainActivity : AppCompatActivity() {
         val health = streamingService?.streamHealth()
         val reconnecting = streaming &&
             (health is StreamHealth.Reconnecting || health is StreamHealth.Failed)
+        val showFlip = streaming && streamingService?.canFlipCamera() == true
+        binding.flipCameraButton.visibility = if (showFlip) View.VISIBLE else View.GONE
         if (streaming && reconnecting) {
             val name = streamingService?.laptopName() ?: payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_reconnecting, name)
             binding.liveRecBadge.visibility = View.GONE
             binding.liveConnectingProgress.visibility = View.VISIBLE
-            binding.flipCameraButton.visibility = View.VISIBLE
             binding.previewToggleButton.visibility = View.VISIBLE
             binding.leaveButton.visibility = View.VISIBLE
             binding.leaveButton.setText(R.string.btn_leave)
@@ -890,7 +909,6 @@ class MainActivity : AppCompatActivity() {
             binding.liveStatus.text = getString(R.string.live_status, name)
             binding.liveRecBadge.visibility = View.VISIBLE
             binding.liveConnectingProgress.visibility = View.GONE
-            binding.flipCameraButton.visibility = View.VISIBLE
             binding.previewToggleButton.visibility = View.VISIBLE
             binding.leaveButton.setText(R.string.btn_leave)
             applyPreviewVisibility()
@@ -900,7 +918,6 @@ class MainActivity : AppCompatActivity() {
             binding.liveStatus.text = getString(R.string.live_connecting, name)
             binding.liveRecBadge.visibility = View.GONE
             binding.liveConnectingProgress.visibility = View.VISIBLE
-            binding.flipCameraButton.visibility = View.GONE
             binding.previewToggleButton.visibility = View.GONE
             binding.leaveButton.setText(R.string.btn_cancel)
             binding.liveBatteryHint.visibility = View.GONE
@@ -1020,6 +1037,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Persist pairing_secret before startForegroundService when the QR had a laptop_id. */
+    private fun persistedCameraFacing(): String =
+        CameraFacing.fromPref(prefs().getString(CameraFacing.PREF_KEY, null))
+
     private fun persistTrustedLaptop(payload: PairingPayload, secret: String?) {
         if (payload.laptopId.isBlank() || secret.isNullOrBlank()) return
         trustedLaptops.upsert(

@@ -29,6 +29,7 @@ class HomeReconnectTest {
             rtpPort: Int,
             ssrc: Long,
             video: VideoProfile,
+            camera: String?,
         ): PairResult = PairResult.Failure("unused")
 
         override fun status(payload: PairingPayload): StatusResult =
@@ -51,7 +52,9 @@ class HomeReconnectTest {
                 rtp = "10.0.0.2:47471",
             )
         }
-        val result = HomeReconnect(client).connect(laptop, phone, rtp, video)
+        val result = HomeReconnect(client).connect(
+            laptop, phone, rtp, video, camera = "front",
+        )
         assertTrue(result is HomeReconnectResult.Ready)
         val ready = result as HomeReconnectResult.Ready
         assertEquals("resume-new", ready.resumeToken)
@@ -64,6 +67,7 @@ class HomeReconnectTest {
         assertEquals(40100, sent.rtpPort)
         assertEquals(99L, sent.ssrc)
         assertEquals("http://10.0.0.2:47470", sent.payload.control)
+        assertEquals("front", sent.camera)
     }
 
     @Test

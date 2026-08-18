@@ -25,6 +25,7 @@ class HomeReconnect(
         phone: PhoneIdentity,
         rtp: RtpIdentity,
         video: VideoProfile,
+        camera: String? = null,
     ): HomeReconnectResult {
         val payload = payloadFor(laptop, video)
         val result = try {
@@ -36,6 +37,7 @@ class HomeReconnect(
                     ssrc = rtp.ssrc,
                     video = video,
                     pairingSecret = laptop.secret,
+                    camera = camera,
                 )
             )
         } catch (t: Exception) {

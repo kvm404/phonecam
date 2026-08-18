@@ -52,6 +52,7 @@ class ReconnectControllerTest {
             rtpPort: Int,
             ssrc: Long,
             video: VideoProfile,
+            camera: String?,
         ): PairResult = PairResult.Failure("unused")
 
         override fun status(payload: PairingPayload): StatusResult =
