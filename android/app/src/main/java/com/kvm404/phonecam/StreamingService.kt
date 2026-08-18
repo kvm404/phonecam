@@ -30,6 +30,7 @@ import com.kvm404.phonecam.pairing.RtpIdentity
 import com.kvm404.phonecam.pairing.VideoProfile
 import com.kvm404.phonecam.pairing.deviceOrientationToSurfaceRotation
 import com.kvm404.phonecam.pairing.quantizeOrientation
+import com.kvm404.phonecam.streaming.BitrateController
 import com.kvm404.phonecam.streaming.CanvasComposer
 import com.kvm404.phonecam.streaming.FrameConverter
 import com.kvm404.phonecam.streaming.RtpPacketizer
@@ -286,7 +287,17 @@ class StreamingService : LifecycleService() {
         val target = InetSocketAddress(current.rtpHost, current.rtpPort)
         val sender = UdpRtpSender(socket, target)
         val packetizer = RtpPacketizer(handoff.rtpIdentity.ssrc, RtpPacketizer.randomInitialSequenceNumber())
-        val encoder = VideoEncoder(handoff.profile, packetizer, sender) { error ->
+        val committed = handoff.profile
+        // Adaptation is drop-driven this PR. A later /status watchdog must call
+        // encoder.noteReceiverAge(last_rtp_ms) on every read, and
+        // encoder.noteRequestKeyframe() only when request_keyframe is set — never
+        // the keyframe hook alone.
+        val encoder = VideoEncoder(
+            committed,
+            packetizer,
+            sender,
+            BitrateController.targetFor(committed.width, committed.height, committed.fps),
+        ) { error ->
             ContextCompat.getMainExecutor(this).execute {
                 stopStreaming(error = error.localizedMessage ?: error.toString())
             }

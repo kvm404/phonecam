@@ -119,6 +119,9 @@ func PipelineArgs(config Config) ([]string, error) {
 		"rtph264depay",
 		"!",
 		"h264parse",
+		// Repeat SPS/PPS with every IDR so a joiner that missed the phone's
+		// pre-IDR sets can start at the next keyframe.
+		"config-interval=-1",
 		"!",
 		"avdec_h264",
 		"!",

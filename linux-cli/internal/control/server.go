@@ -104,6 +104,7 @@ type statusResponse struct {
 	PacketsDropped   uint64                `json:"packets_dropped_acl,omitempty"`
 	PacketsRecv      uint64                `json:"packets_received,omitempty"`
 	ReceiverRestarts int                   `json:"receiver_restarts,omitempty"`
+	RequestKeyframe  bool                  `json:"request_keyframe,omitempty"`
 	ReconnectReady   bool                  `json:"reconnect_ready,omitempty"`
 	ResumeToken      string                `json:"resume_token,omitempty"`
 	PairingSecret    string                `json:"pairing_secret,omitempty"`
@@ -353,6 +354,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				ms = 0
 			}
 			body["last_rtp_ms"] = ms
+			if ms > 400 {
+				body["request_keyframe"] = true
+			}
 		} else {
 			body["last_rtp_ms"] = nil
 		}
