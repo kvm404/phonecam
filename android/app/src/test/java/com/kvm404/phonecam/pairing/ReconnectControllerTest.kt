@@ -230,6 +230,122 @@ class ReconnectControllerTest {
     }
 
     @Test
+    fun `reportCamera posts live pin and stays Live without resolving identity`() = runTest {
+        var resolved = 0
+        val client = FakeControlClient { request ->
+            ReconnectResult.Ok(
+                approved = true,
+                session = "new-sess",
+                resumeToken = "echoed-resume",
+                control = "http://10.0.0.2:47470",
+                rtp = "10.0.0.2:47471",
+            )
+        }
+        val controller = ReconnectController(
+            client = client,
+            creds = creds(),
+            clock = { 0L },
+            wifiAvailable = { true },
+            resolveIdentity = {
+                resolved++
+                error("reportCamera must keep the live RTP pin")
+            },
+            camera = { "front" },
+        )
+
+        controller.reportCamera(RtpEndpoint(port = 40100, ssrc = 99L))
+
+        assertTrue(controller.health.value is StreamHealth.Live)
+        assertEquals(0, resolved)
+        assertEquals(1, client.requests.size)
+        val sent = client.requests[0]
+        assertEquals(40100, sent.rtpPort)
+        assertEquals(99L, sent.ssrc)
+        assertEquals("front", sent.camera)
+        assertEquals("old-resume", sent.resumeToken)
+        assertEquals("stored-secret", sent.pairingSecret)
+        assertEquals("echoed-resume", controller.credentials().resumeToken)
+        assertEquals("new-sess", controller.credentials().payload.session)
+    }
+
+    @Test
+    fun `reportCamera failure keeps Live`() = runTest {
+        val client = FakeControlClient { ReconnectResult.Failure("down") }
+        val controller = ReconnectController(
+            client = client,
+            creds = creds(),
+            clock = { 0L },
+            wifiAvailable = { true },
+            resolveIdentity = { error("unused") },
+            camera = { "back" },
+        )
+
+        controller.reportCamera(RtpEndpoint(40000, 1L))
+
+        assertTrue(controller.health.value is StreamHealth.Live)
+        assertEquals(1, client.requests.size)
+        assertEquals("old-resume", controller.credentials().resumeToken)
+    }
+
+    @Test
+    fun `reportCamera is a no-op while a loop is running`() = runTest {
+        var now = 0L
+        val client = FakeControlClient { ReconnectResult.Failure("down") }
+        val controller = ReconnectController(
+            client = client,
+            creds = creds(),
+            clock = { now },
+            wifiAvailable = { true },
+            resolveIdentity = { RtpEndpoint(40000, 1L) },
+            camera = { "front" },
+            delayMs = { ms ->
+                now += ms
+                kotlinx.coroutines.delay(ms)
+            },
+        )
+
+        val job = launch { controller.start() }
+        advanceTimeBy(100L)
+        assertEquals(1, client.requests.size)
+        assertTrue(controller.health.value is StreamHealth.Reconnecting)
+
+        controller.reportCamera(RtpEndpoint(40100, 99L))
+        assertEquals(1, client.requests.size)
+        assertEquals(40000, client.requests[0].rtpPort)
+
+        controller.cancel()
+        advanceTimeBy(1_000L)
+        advanceUntilIdle()
+        job.join()
+    }
+
+    @Test
+    fun `reportCamera is a no-op after Failed`() = runTest {
+        var now = 0L
+        val client = FakeControlClient { ReconnectResult.Failure("down") }
+        val controller = ReconnectController(
+            client = client,
+            creds = creds(),
+            clock = { now },
+            wifiAvailable = { true },
+            resolveIdentity = { RtpEndpoint(40000, 1L) },
+            delayMs = { ms ->
+                now += ms
+                kotlinx.coroutines.delay(ms)
+            },
+        )
+
+        controller.start()
+        assertTrue(controller.health.value is StreamHealth.Failed)
+        val posts = client.requests.size
+        assertTrue(posts > 1)
+
+        controller.reportCamera(RtpEndpoint(40100, 99L))
+        assertEquals(posts, client.requests.size)
+        assertTrue(controller.health.value is StreamHealth.Failed)
+    }
+
+    @Test
     fun `second start is a no-op while a loop is running`() = runTest {
         var now = 0L
         val client = FakeControlClient { ReconnectResult.Failure("down") }

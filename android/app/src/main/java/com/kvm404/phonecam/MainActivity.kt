@@ -1036,10 +1036,10 @@ class MainActivity : AppCompatActivity() {
         teardownToHome(getString(R.string.home_status_error, message))
     }
 
-    /** Persist pairing_secret before startForegroundService when the QR had a laptop_id. */
     private fun persistedCameraFacing(): String =
         CameraFacing.fromPref(prefs().getString(CameraFacing.PREF_KEY, null))
 
+    /** Persist pairing_secret before startForegroundService when the QR had a laptop_id. */
     private fun persistTrustedLaptop(payload: PairingPayload, secret: String?) {
         if (payload.laptopId.isBlank() || secret.isNullOrBlank()) return
         trustedLaptops.upsert(

@@ -249,6 +249,10 @@ class StreamingService : LifecycleService() {
     @Volatile
     private var streaming = false
 
+    /** First-bind fell back; publish cameraLabel() once reconnectController exists. */
+    @Volatile
+    private var reportCameraAfterRecovery = false
+
     // ------------------------------------------------------------------ Service lifecycle
 
     override fun onCreate() {
@@ -334,11 +338,9 @@ class StreamingService : LifecycleService() {
     fun canFlipCamera(): Boolean {
         val provider = cameraProvider ?: return false
         return try {
-            CameraFacing.canFlip(
-                provider.availableCameraInfos.map { it.lensFacing },
-                back = CameraSelector.LENS_FACING_BACK,
-                front = CameraSelector.LENS_FACING_FRONT,
-            )
+            // Flip binds DEFAULT_BACK/FRONT; extra BACK or EXTERNAL infos do not count.
+            provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) &&
+                provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)
         } catch (_: Exception) {
             false
         }
@@ -437,6 +439,7 @@ class StreamingService : LifecycleService() {
         watchdogJob = null
         healthJob = null
         reconnectController = null
+        reportCameraAfterRecovery = false
         unregisterWifiCallback()
         stopOrientationTracking()
         orientationListener = null
@@ -475,25 +478,42 @@ class StreamingService : LifecycleService() {
         isFlip: Boolean,
         previous: CameraSelector?,
     ) {
-        val analysis = buildAnalysis()
-        // Seed the freshly-bound analyzer with the current device orientation so the first
-        // frames (and any post-flip frames) are already upright before the sensor next fires.
-        analysis.targetRotation = deviceOrientationToSurfaceRotation(deviceOrientation)
-        imageAnalysis = analysis
-        provider.unbindAll()
-        preview = null
         val requested = cameraSelector
+        // Probe before unbindAll so a missing opposite lens cannot tear down a live bind.
+        if (!providerHasCamera(provider, requested)) {
+            if (isFlip) {
+                cameraSelector = previous ?: oppositeSelector(requested)
+                notifyNoOtherCamera()
+                callback?.onCameraReady()
+                return
+            }
+            val fallback = oppositeSelector(requested)
+            if (!providerHasCamera(provider, fallback)) {
+                stopStreaming(error = "no camera available")
+                return
+            }
+            cameraSelector = fallback
+            try {
+                bindUseCasesAfterUnbind(provider, fallback)
+            } catch (e: Exception) {
+                stopStreaming(error = e.localizedMessage ?: e.toString())
+                return
+            }
+            persistFacing()
+            notifyNoOtherCamera()
+            callback?.onCameraReady()
+            scheduleBoundCameraReport()
+            return
+        }
         try {
-            bindUseCases(provider, requested, analysis)
+            bindUseCasesAfterUnbind(provider, requested)
             if (isFlip) persistFacing()
             callback?.onCameraReady()
         } catch (e: Exception) {
-            // Missing facing (or an equivalent selector failure) must not kill a live
-            // session. First start may fall back once; a failed flip rebinds the last lens.
             if (isFlip) {
                 cameraSelector = previous ?: oppositeSelector(requested)
                 try {
-                    bindUseCases(provider, cameraSelector, analysis)
+                    bindUseCasesAfterUnbind(provider, cameraSelector)
                 } catch (rebind: Exception) {
                     stopStreaming(error = rebind.localizedMessage ?: rebind.toString())
                     return
@@ -502,21 +522,31 @@ class StreamingService : LifecycleService() {
                 callback?.onCameraReady()
                 return
             }
-            if (e is IllegalArgumentException) {
-                cameraSelector = oppositeSelector(requested)
-                try {
-                    bindUseCases(provider, cameraSelector, analysis)
-                    persistFacing()
-                    notifyNoOtherCamera()
-                    callback?.onCameraReady()
-                    return
-                } catch (_: Exception) {
-                    stopStreaming(error = e.localizedMessage ?: e.toString())
-                    return
-                }
-            }
             stopStreaming(error = e.localizedMessage ?: e.toString())
         }
+    }
+
+    private fun providerHasCamera(
+        provider: ProcessCameraProvider,
+        selector: CameraSelector,
+    ): Boolean = try {
+        provider.hasCamera(selector)
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun bindUseCasesAfterUnbind(
+        provider: ProcessCameraProvider,
+        selector: CameraSelector,
+    ) {
+        val analysis = buildAnalysis()
+        // Seed the freshly-bound analyzer with the current device orientation so the first
+        // frames (and any post-flip frames) are already upright before the sensor next fires.
+        analysis.targetRotation = deviceOrientationToSurfaceRotation(deviceOrientation)
+        imageAnalysis = analysis
+        provider.unbindAll()
+        preview = null
+        bindUseCases(provider, selector, analysis)
     }
 
     private fun bindUseCases(
@@ -658,6 +688,7 @@ class StreamingService : LifecycleService() {
                 if (streaming) pollLaptopStatus()
             }
         }
+        publishBoundCamera()
     }
 
     private fun startReconnect(reason: String) {
@@ -760,6 +791,28 @@ class StreamingService : LifecycleService() {
         } else {
             CameraFacing.BACK
         }
+
+    private fun scheduleBoundCameraReport() {
+        reportCameraAfterRecovery = true
+        publishBoundCamera()
+    }
+
+    /**
+     * One-shot /reconnect with the live RTP pin so /status camera matches a
+     * first-bind fallback. Same port/SSRC and canvas: the laptop does not
+     * restart gst. A later in-session reconnect already sends [cameraLabel].
+     */
+    private fun publishBoundCamera() {
+        if (!reportCameraAfterRecovery || !streaming) return
+        val controller = reconnectController ?: return
+        val identity = rtpIdentity ?: return
+        reportCameraAfterRecovery = false
+        val endpoint = RtpEndpoint(identity.sourcePort, identity.ssrc)
+        Log.i(TAG, "report bound camera=${cameraLabel()}")
+        serviceScope.launch(Dispatchers.IO) {
+            controller.reportCamera(endpoint)
+        }
+    }
 
     private fun applyPersistedFacing() {
         cameraSelector = if (
