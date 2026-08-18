@@ -24,7 +24,7 @@ Design: [`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.
 - Persistent trusted device pairing (next session without a new QR).
 - Better degraded-network behavior (stay live under loss).
 - Camera-switch polish (front/back flip already shipped; persist facing and fail safe).
-- Resolution/FPS leftovers (720p/540p/360p selector already shipped; bitrate-per-preset and optional 15 fps).
+- Resolution leftovers (720p/540p/360p selector already shipped; bitrate-per-preset already shipped).
 
 ## v0.3: Desktop Experience
 
@@ -51,4 +51,5 @@ Deferred from v0.2; not part of the v0.3 desktop slice.
 
 - Torch toggle.
 - Latency measurement harness (`docs/BENCHMARKS.md` stays a template until then).
+- 15 fps Home toggle (dropped from v0.2; bitrate-per-preset already shipped).
 

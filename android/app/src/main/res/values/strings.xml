@@ -11,6 +11,12 @@
     <string name="home_status_permission_needed">Camera permission is needed to scan the QR.</string>
     <string name="home_status_error">Error: %1$s</string>
     <string name="btn_scan_connect">Scan QR</string>
+    <string name="btn_reconnect_to">Reconnect to %1$s</string>
+    <string name="btn_forget">Forget</string>
+    <string name="forget_laptop_copy">Forget on this device only — run phonecam trust revoke on the laptop to bar this phone.</string>
+    <string name="home_status_cant_reach">Can’t reach %1$s — scan the QR</string>
+    <string name="home_status_reconnect_in_use">PhoneCam is in use — stop it on the laptop or revoke the other phone.</string>
+    <string name="home_status_reconnecting">Reconnecting to %1$s…</string>
     <string name="btn_exit">Exit</string>
 
     <!-- Quality selector -->

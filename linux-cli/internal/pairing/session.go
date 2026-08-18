@@ -50,6 +50,7 @@ const (
 
 type Config struct {
 	LaptopName string
+	LaptopID   string
 	ControlURL string
 	RTPHost    string
 	RTPPort    int
@@ -69,6 +70,7 @@ type VideoProfile struct {
 type Payload struct {
 	Version   int          `json:"v"`
 	Name      string       `json:"name"`
+	LaptopID  string       `json:"laptop_id,omitempty"`
 	Control   string       `json:"control"`
 	RTP       string       `json:"rtp"`
 	SessionID string       `json:"session"`
@@ -113,6 +115,7 @@ type Session struct {
 	rtpSource     *RTPSource
 	negotiated    *VideoProfile
 	resumeToken   string
+	pairingSecret string
 	secretsTaken  bool
 }
 
@@ -152,6 +155,7 @@ func New(config Config) (*Session, error) {
 		payload: Payload{
 			Version:   ProtocolVersion,
 			Name:      laptopName,
+			LaptopID:  config.LaptopID,
 			Control:   config.ControlURL,
 			RTP:       net.JoinHostPort(config.RTPHost, fmt.Sprintf("%d", config.RTPPort)),
 			SessionID: sessionID,
@@ -236,6 +240,17 @@ func (s *Session) ConsumeToken(request TokenRequest, now time.Time) error {
 }
 
 func (s *Session) Approve(now time.Time) error {
+	return s.approve(now, "")
+}
+
+// ApproveWithSecret is Approve plus pairing_secret in the same lock so a
+// concurrent TakeSecrets cannot observe an approved session with an empty
+// pairing field. already-approved is still a no-op (secret is not rotated).
+func (s *Session) ApproveWithSecret(now time.Time, secret string) error {
+	return s.approve(now, secret)
+}
+
+func (s *Session) approve(now time.Time, secret string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -261,7 +276,83 @@ func (s *Session) Approve(now time.Time) error {
 	s.approved = true
 	s.approvedPhone = s.pendingPhone
 	s.resumeToken = token
+	if secret != "" {
+		s.pairingSecret = secret
+	}
 	s.secretsTaken = false
+	return nil
+}
+
+// SetPairingSecret attaches the long-lived pairing_secret. Call it before
+// Approve so one-shot TakeSecrets cannot race an empty pairing field.
+func (s *Session) SetPairingSecret(secret string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pairingSecret = secret
+}
+
+// PairingSecret returns the attached pairing_secret, or empty.
+func (s *Session) PairingSecret() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pairingSecret
+}
+
+// ApproveTrusted installs a trusted phone without consulting QR TTL and
+// without Invalidate. leftover QR is marked consumed. pairing_secret is
+// not rotated. A same-id already-approved session rebinds and echoes the
+// live resume_token.
+func (s *Session) ApproveTrusted(phone Phone, source RTPSource, video *VideoProfile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.invalidated {
+		return ErrInvalidated
+	}
+	if source.SSRC == 0 {
+		return ErrInvalidSSRC
+	}
+	if source.IP == nil || !validPort(source.Port) {
+		return ErrInvalidEndpoint
+	}
+	if video != nil {
+		if err := validateVideoProfile(*video); err != nil {
+			return err
+		}
+	}
+
+	if s.approved {
+		if s.approvedPhone.ID != phone.ID {
+			return ErrDifferentPhone
+		}
+		pending := copyRTPSource(source)
+		bound := copyRTPSource(source)
+		s.pendingSource = pending
+		s.rtpSource = &bound
+		if video != nil {
+			copied := *video
+			s.negotiated = &copied
+		}
+		return nil
+	}
+
+	token, err := randomBase64URL(TokenBytes)
+	if err != nil {
+		return err
+	}
+	s.consumed = true
+	s.approved = true
+	s.approvedPhone = phone
+	pending := copyRTPSource(source)
+	bound := copyRTPSource(source)
+	s.pendingSource = pending
+	s.rtpSource = &bound
+	s.resumeToken = token
+	s.secretsTaken = false
+	if video != nil {
+		copied := *video
+		s.negotiated = &copied
+	}
 	return nil
 }
 
@@ -325,6 +416,7 @@ func (s *Session) Invalidate() {
 	s.approved = false
 	s.rtpSource = nil
 	s.resumeToken = ""
+	s.pairingSecret = ""
 	s.secretsTaken = true
 }
 
@@ -395,7 +487,7 @@ func (s *Session) ResumeToken() string {
 }
 
 // TakeSecrets returns resume and pairing secrets once. pairing is empty until
-// the trust store exists. Subsequent calls return ok=false.
+// SetPairingSecret is called. Subsequent calls return ok=false.
 func (s *Session) TakeSecrets() (resume, pairing string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -404,7 +496,7 @@ func (s *Session) TakeSecrets() (resume, pairing string, ok bool) {
 		return "", "", false
 	}
 	s.secretsTaken = true
-	return s.resumeToken, "", true
+	return s.resumeToken, s.pairingSecret, true
 }
 
 // ApprovedControlIP is the HTTP peer that consumed the QR token (or the last

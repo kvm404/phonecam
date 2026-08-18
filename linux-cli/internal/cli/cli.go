@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/doctor"
 	"github.com/kvm404/phonecam/linux-cli/internal/lifecycle"
 	"github.com/kvm404/phonecam/linux-cli/internal/smoke"
 	"github.com/kvm404/phonecam/linux-cli/internal/start"
+	"github.com/kvm404/phonecam/linux-cli/internal/trust"
 )
 
 var version = "0.1.0"
@@ -52,6 +54,14 @@ func (OSSystem) ReadFile(path string) ([]byte, error) {
 
 func (OSSystem) Getenv(name string) string {
 	return os.Getenv(name)
+}
+
+func (OSSystem) FileMode(path string) (os.FileMode, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Mode().Perm(), nil
 }
 
 func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr io.Writer) int {
@@ -100,6 +110,8 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 	case "install":
 		printInstall(sys, stdout)
 		return 0
+	case "trust":
+		return runTrust(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n\n", args[0])
 		printHelp(stderr)
@@ -118,9 +130,22 @@ func requireNoArgs(command string, args []string, stderr io.Writer) (int, bool) 
 }
 
 func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	controlPort, rtpPort, autoApprove, code, ok := parseStartFlags(args, stderr)
+	controlPort, rtpPort, autoApprove, noTrust, code, ok := parseStartFlags(args, stderr)
 	if !ok {
 		return code
+	}
+
+	var store *trust.Store
+	if !noTrust {
+		opened, err := trust.Open(nil, stdout)
+		switch {
+		case errors.Is(err, trust.ErrUnknownVersion):
+			fmt.Fprintln(stdout, "Warning: trusted.json has an unknown version; running without persistent trust")
+		case err != nil:
+			fmt.Fprintf(stdout, "Warning: could not open trust store: %v\n", err)
+		default:
+			store = opened
+		}
 	}
 
 	runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -130,6 +155,7 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		ControlPort:   controlPort,
 		RTPPort:       rtpPort,
 		AutoApprove:   autoApprove,
+		Trust:         store,
 	}, os.Stdin, stdout)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(stderr, "phonecam start failed: %v\n", err)
@@ -145,7 +171,7 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // Pairing is auto-approved by default: the QR token already proves the phone
 // saw this machine's screen, so a second confirmation adds friction without
 // adding trust. --require-approval restores the interactive y/N prompt.
-func parseStartFlags(args []string, stderr io.Writer) (controlPort, rtpPort int, autoApprove bool, code int, ok bool) {
+func parseStartFlags(args []string, stderr io.Writer) (controlPort, rtpPort int, autoApprove, noTrust bool, code int, ok bool) {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
@@ -158,19 +184,69 @@ Flags:
   --rtp-port int        UDP RTP port (0 = ephemeral/random) (default 47471)
   --require-approval    Ask y/N before accepting a phone (default: auto-approve
                         the phone that scanned the QR)
+  --no-trust            Do not read or write the trusted-phone store
 `)
 	}
 	control := fs.Int("control-port", start.DefaultControlPort, "TCP control port (0 = ephemeral/random)")
 	rtp := fs.Int("rtp-port", start.DefaultRTPPort, "UDP RTP port (0 = ephemeral/random)")
 	requireApproval := fs.Bool("require-approval", false, "ask y/N before accepting a phone")
+	skipTrust := fs.Bool("no-trust", false, "do not read or write the trusted-phone store")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return 0, 0, false, 0, false
+			return 0, 0, false, false, 0, false
 		}
-		return 0, 0, false, 2, false
+		return 0, 0, false, false, 2, false
 	}
-	return *control, *rtp, !*requireApproval, 0, true
+	return *control, *rtp, !*requireApproval, *skipTrust, 0, true
+}
+
+func runTrust(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, `Usage: phonecam trust <list|revoke <id-or-name>|revoke-all>
+`)
+		return 2
+	}
+	store, err := trust.Open(nil, stdout)
+	if err != nil {
+		fmt.Fprintf(stderr, "phonecam trust: %v\n", err)
+		return 1
+	}
+	switch args[0] {
+	case "list":
+		phones := store.List()
+		if len(phones) == 0 {
+			fmt.Fprintln(stdout, "No trusted phones.")
+			return 0
+		}
+		for _, p := range phones {
+			fmt.Fprintf(stdout, "%s  %s  last_seen %s\n", p.ID, p.Name, p.LastSeen.UTC().Format(time.RFC3339))
+		}
+		return 0
+	case "revoke":
+		if len(args) != 2 {
+			fmt.Fprint(stderr, "Usage: phonecam trust revoke <id-or-name>\n")
+			return 2
+		}
+		if err := store.Revoke(args[1]); err != nil {
+			fmt.Fprintf(stderr, "phonecam trust revoke: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Revoked %s.\n", args[1])
+		return 0
+	case "revoke-all":
+		if err := store.RevokeAll(); err != nil {
+			fmt.Fprintf(stderr, "phonecam trust revoke-all: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "Revoked all trusted phones.")
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown trust command: %s\n", args[0])
+		fmt.Fprint(stderr, `Usage: phonecam trust <list|revoke <id-or-name>|revoke-all>
+`)
+		return 2
+	}
 }
 
 func printHelp(w io.Writer) {
@@ -182,12 +258,15 @@ Usage:
 Commands:
   start      Start pairing and the Linux receiver
              (flags: --control-port [47470], --rtp-port [47471]; 0 = random;
-              --require-approval to confirm each phone with a y/N prompt)
+              --require-approval to confirm each phone with a y/N prompt;
+              --no-trust to skip the trusted-phone store)
   smoke      Run a local RTP loopback self-test
   status     Show whether PhoneCam is running and its pairing state
   stop       Stop the running PhoneCam receiver
   doctor     Check Linux dependencies and setup
   install    Print distro dependency hints
+  trust      List or revoke remembered phones
+             (list | revoke <id-or-name> | revoke-all)
   version    Print version
   help       Show this help
 `)

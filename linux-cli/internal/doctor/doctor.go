@@ -1,13 +1,16 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"syscall"
 
 	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
+	"github.com/kvm404/phonecam/linux-cli/internal/trust"
 )
 
 const (
@@ -24,6 +27,7 @@ type System interface {
 	CanWrite(path string) bool
 	ReadFile(path string) ([]byte, error)
 	Getenv(name string) string
+	FileMode(path string) (os.FileMode, error)
 }
 
 type Check struct {
@@ -100,12 +104,13 @@ func Run(sys System) Report {
 	checks = append(checks, distroCheck(sys))
 	checks = append(checks, firewallCheck(sys))
 	checks = append(checks, udpRcvbufCheck())
+	checks = append(checks, trustFileCheck(sys))
 	checks = append(checks, appVisibilityGuidanceCheck())
 	checks = append(checks, Check{
 		Name:    "LAN privacy",
 		Status:  StatusInfo,
-		Message: "v0.1 uses local-network RTP/UDP without payload encryption in the first implementation spike",
-		Fix:     "Use trusted local networks only until encrypted transport is implemented.",
+		Message: "v0.2 uses local-network RTP/UDP without payload encryption; trusted pairing does not encrypt RTP",
+		Fix:     "Use trusted local networks only. pairing_secret lives in a local 0600 trust file; RTP stays unencrypted.",
 	})
 
 	return Report{Checks: checks}
@@ -304,6 +309,39 @@ func firewallCheck(sys System) Check {
 		Status:  StatusInfo,
 		Message: "no active ufw or firewalld detected; PhoneCam needs local TCP control and UDP RTP ports reachable from the Android phone",
 		Fix:     "If pairing or streaming fails, allow PhoneCam on your trusted LAN firewall profile.",
+	}
+}
+
+func trustFileCheck(sys System) Check {
+	path := trust.PathFromEnv(sys.Getenv)
+	mode, err := sys.FileMode(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Check{
+				Name:    "Trust file",
+				Status:  StatusInfo,
+				Message: "no trusted.json (QR pairing only until a phone is approved)",
+			}
+		}
+		return Check{
+			Name:    "Trust file",
+			Status:  StatusWarn,
+			Message: "could not stat trusted.json: " + err.Error(),
+			Fix:     "Check permissions on " + path,
+		}
+	}
+	if mode != 0o600 {
+		return Check{
+			Name:    "Trust file",
+			Status:  StatusWarn,
+			Message: fmt.Sprintf("%s mode is %04o, want 0600", path, mode),
+			Fix:     "chmod 600 " + path,
+		}
+	}
+	return Check{
+		Name:    "Trust file",
+		Status:  StatusPass,
+		Message: path + " is mode 0600",
 	}
 }
 

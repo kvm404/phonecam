@@ -44,6 +44,10 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.kvm404.phonecam.databinding.ActivityMainBinding
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.kvm404.phonecam.pairing.HomeReconnect
+import com.kvm404.phonecam.pairing.HomeReconnectResult
 import com.kvm404.phonecam.pairing.HttpControlClient
 import com.kvm404.phonecam.pairing.PairingController
 import com.kvm404.phonecam.pairing.PairingPayload
@@ -52,12 +56,15 @@ import com.kvm404.phonecam.pairing.PhoneIdentity
 import com.kvm404.phonecam.pairing.RtpIdentity
 import com.kvm404.phonecam.pairing.StreamHealth
 import com.kvm404.phonecam.pairing.StreamQuality
+import com.kvm404.phonecam.pairing.TrustedLaptop
+import com.kvm404.phonecam.pairing.TrustedLaptops
 import com.kvm404.phonecam.pairing.VideoProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.Executors
 
@@ -206,14 +213,32 @@ class MainActivity : AppCompatActivity() {
         PhoneIdentity(id = id, name = Build.MODEL)
     }
 
+    private val trustedLaptops: TrustedLaptops by lazy {
+        val prefs = prefs()
+        TrustedLaptops(
+            load = { prefs.getString(TrustedLaptops.PREF_KEY, null) },
+            save = { prefs.edit().putString(TrustedLaptops.PREF_KEY, it).apply() },
+        )
+    }
+
+    private var pendingReconnect: TrustedLaptop? = null
+    private var homeReconnectJob: Job? = null
+
     private fun prefs() = getSharedPreferences("phonecam", MODE_PRIVATE)
 
     private val requestCameraPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
                 maybeRequestNotificationPermission()
-                showScan()
+                val laptop = pendingReconnect
+                pendingReconnect = null
+                if (laptop != null) {
+                    startHomeReconnect(laptop)
+                } else {
+                    showScan()
+                }
             } else {
+                pendingReconnect = null
                 showHome(getString(R.string.home_status_permission_needed))
             }
         }
@@ -368,6 +393,107 @@ class MainActivity : AppCompatActivity() {
         binding.homeContainer.visibility = View.VISIBLE
         binding.scanContainer.visibility = View.GONE
         binding.liveContainer.visibility = View.GONE
+        renderReconnectList()
+    }
+
+    private fun renderReconnectList() {
+        val list = binding.reconnectList
+        list.removeAllViews()
+        val laptops = trustedLaptops.list()
+        if (laptops.isEmpty()) {
+            list.visibility = View.GONE
+            return
+        }
+        list.visibility = View.VISIBLE
+        for (laptop in laptops) {
+            val btn = layoutInflater.inflate(R.layout.item_reconnect, list, false) as MaterialButton
+            val label = laptop.name.ifBlank { laptop.laptopId }
+            btn.text = getString(R.string.btn_reconnect_to, label)
+            btn.setOnClickListener { onReconnectClicked(laptop) }
+            btn.setOnLongClickListener {
+                confirmForget(laptop)
+                true
+            }
+            list.addView(btn)
+        }
+    }
+
+    private fun confirmForget(laptop: TrustedLaptop) {
+        MaterialAlertDialogBuilder(this)
+            .setMessage(R.string.forget_laptop_copy)
+            .setPositiveButton(R.string.btn_forget) { _, _ ->
+                trustedLaptops.forget(laptop.laptopId)
+                renderReconnectList()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun onReconnectClicked(laptop: TrustedLaptop) {
+        if (StreamingService.isRunning) {
+            showHome(getString(R.string.home_status_stopping))
+            watchServiceStop()
+            return
+        }
+        if (!hasCameraPermission()) {
+            pendingReconnect = laptop
+            requestCameraPermission.launch(Manifest.permission.CAMERA)
+            return
+        }
+        maybeRequestNotificationPermission()
+        startHomeReconnect(laptop)
+    }
+
+    private fun startHomeReconnect(laptop: TrustedLaptop) {
+        if (homeReconnectJob != null) return
+        val committed = selectedQuality.toProfile()
+        committedProfile = committed
+        showHome(getString(R.string.home_status_reconnecting, laptop.name.ifBlank { laptop.laptopId }))
+        homeReconnectJob = lifecycleScope.launch {
+            try {
+                val rtp = withContext(Dispatchers.IO) { RtpIdentity.create() }
+                rtpIdentity = rtp
+                val result = withContext(Dispatchers.IO) {
+                    HomeReconnect(HttpControlClient()).connect(
+                        laptop = laptop,
+                        phone = phoneIdentity,
+                        rtp = rtp,
+                        video = committed,
+                    )
+                }
+                when (result) {
+                    is HomeReconnectResult.Ready -> {
+                        persistTrustedLaptop(result.payload, result.pairingSecret)
+                        payload = result.payload
+                        committedProfile = result.profile
+                        showLive()
+                        onPaired(
+                            PairingState.Paired(
+                                payload = result.payload,
+                                resumeToken = result.resumeToken,
+                                pairingSecret = result.pairingSecret,
+                            )
+                        )
+                    }
+                    is HomeReconnectResult.Failure -> {
+                        rtp.close()
+                        rtpIdentity = null
+                        showHome(result.message)
+                    }
+                }
+            } catch (e: Exception) {
+                rtpIdentity?.close()
+                rtpIdentity = null
+                showHome(
+                    getString(
+                        R.string.home_status_cant_reach,
+                        laptop.name.ifBlank { laptop.laptopId },
+                    )
+                )
+            } finally {
+                homeReconnectJob = null
+            }
+        }
     }
 
     private fun paintHomeStatusDot(status: String) {
@@ -435,6 +561,8 @@ class MainActivity : AppCompatActivity() {
     private fun teardownToHome(status: String) {
         pairingJob?.cancel()
         pairingJob = null
+        homeReconnectJob?.cancel()
+        homeReconnectJob = null
         handledPayload = false
         unbindFromService()
         keepScreenOn(false)
@@ -674,6 +802,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        persistTrustedLaptop(current, paired.pairingSecret)
+
         StreamingService.pendingPreviewWanted = previewVisible
         StreamingSession.payload = current
         StreamingSession.profile = profile
@@ -889,6 +1019,21 @@ class MainActivity : AppCompatActivity() {
         teardownToHome(getString(R.string.home_status_error, message))
     }
 
+    /** Persist pairing_secret before startForegroundService when the QR had a laptop_id. */
+    private fun persistTrustedLaptop(payload: PairingPayload, secret: String?) {
+        if (payload.laptopId.isBlank() || secret.isNullOrBlank()) return
+        trustedLaptops.upsert(
+            TrustedLaptop(
+                laptopId = payload.laptopId,
+                name = payload.name,
+                control = payload.control,
+                rtp = payload.rtp,
+                secret = secret,
+                lastSeen = Instant.now().toString(),
+            )
+        )
+    }
+
     // ------------------------------------------------------------------ Activity lifecycle
 
     override fun onStart() {
@@ -905,6 +1050,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         pairingJob?.cancel()
+        homeReconnectJob?.cancel()
         // Unbind WITHOUT stopping the service — streaming must continue when the activity is
         // destroyed (task removed, recreate). Do NOT unbindAll the shared camera provider.
         unbindFromService()

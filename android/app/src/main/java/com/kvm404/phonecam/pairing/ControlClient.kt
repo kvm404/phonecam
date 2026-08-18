@@ -41,7 +41,7 @@ sealed interface StatusResult {
     data class Failure(val message: String) : StatusResult
 }
 
-/** Body for POST /reconnect. pairingSecret is sent when held; the laptop ignores it this PR. */
+/** Body for POST /reconnect. pairingSecret is sent when held (cross-session trust). */
 data class ReconnectRequest(
     val payload: PairingPayload,
     val phone: PhoneIdentity,

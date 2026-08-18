@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/kvm404/phonecam/linux-cli/internal/gstreamer"
 	"github.com/kvm404/phonecam/linux-cli/internal/pairing"
 	"github.com/kvm404/phonecam/linux-cli/internal/session"
+	"github.com/kvm404/phonecam/linux-cli/internal/trust"
 )
 
 // fakeStore records the session records written and how many times Remove was
@@ -1347,4 +1349,201 @@ func TestRunRestartReceiverReloadsWxH(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context canceled, got %v", err)
 	}
+}
+
+func TestRunNoTrustOmitsLaptopIDAndDoesNotWrite(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			Trust: nil,
+		}, nil, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	if payload.LaptopID != "" {
+		t.Fatalf("--no-trust must omit laptop_id, got %q", payload.LaptopID)
+	}
+	if strings.Contains(out.String(), "Trusted phones can tap Reconnect") {
+		t.Fatal("empty/no-trust must not print the reconnect hint")
+	}
+	if strings.Contains(out.String(), "pairing_secret") {
+		t.Fatal("writeStartOutput must never print pairing_secret")
+	}
+	approveViaHTTP(t, payload, nil)
+	waitForReceiver(t, receiver)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "phonecam", "trusted.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("--no-trust must not write trusted.json: %v", err)
+	}
+}
+
+func TestRunTrustPrintsHintAndLaptopID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	store, err := trust.Open(nil, io.Discard)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := store.Upsert("phone-1", "Pixel", time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			AutoApprove: true,
+			Trust:       store,
+		}, nil, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	if payload.LaptopID != store.LaptopID() {
+		t.Fatalf("QR laptop_id %q, want %q", payload.LaptopID, store.LaptopID())
+	}
+	if !strings.Contains(out.String(), "Trusted phones can tap Reconnect") {
+		t.Fatalf("expected reconnect hint when store is non-empty:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "trusted reconnect allowed") {
+		t.Fatalf("expected waiting status to mention trusted reconnect:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "pairing_secret") {
+		t.Fatal("writeStartOutput must never print pairing_secret")
+	}
+
+	approveViaHTTP(t, payload, nil)
+	waitForReceiver(t, receiver)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRunAutoApprovePairSecretMatchesStoreAfterWaitLoop(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	store, err := trust.Open(nil, io.Discard)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	receiver := &blockingReceiver{}
+	var out lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- New(testSystem(), receiver, &fakePreflight{}, &fakeStore{}).Run(ctx, Config{
+			AutoApprove: true,
+			Trust:       store,
+		}, nil, &out)
+	}()
+
+	payload := waitForPayload(t, &out)
+	code, body := postPairHTTP(t, payload, nil)
+	if code != http.StatusAccepted {
+		t.Fatalf("expected pair 202, got %d %s", code, body)
+	}
+	secret, _ := body["pairing_secret"].(string)
+	if secret == "" {
+		t.Fatalf("expected pairing_secret on 202, got %#v", body)
+	}
+	waitForReceiver(t, receiver)
+	if _, ok := store.LookupBySecret("phone-1", secret); !ok {
+		t.Fatal("202 pairing_secret must still match the store after the wait loop")
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestPersistAndApproveDoesNotRotateAfterApproveTrusted(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	store, err := trust.Open(nil, io.Discard)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	secret, err := store.Upsert("trusted-a", "Alpha", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := pairing.New(pairing.Config{
+		ControlURL: "http://192.168.1.42:49321",
+		RTPHost:    "192.168.1.42",
+		RTPPort:    49322,
+		Now:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.ConsumeToken(pairing.TokenRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-b", Name: "Pixel"},
+		ControlIP: net.ParseIP("192.168.1.50"),
+		RTPPort:   50000,
+		SSRC:      1234,
+	}, now.Add(time.Second)); err != nil {
+		t.Fatalf("consume leftover QR: %v", err)
+	}
+	if err := session.ApproveTrusted(
+		pairing.Phone{ID: "trusted-a", Name: "Alpha"},
+		pairing.RTPSource{IP: net.ParseIP("192.168.1.60"), Port: 51000, SSRC: 99},
+		nil,
+	); err != nil {
+		t.Fatalf("ApproveTrusted: %v", err)
+	}
+
+	if err := persistAndApprove(session, store, now.Add(time.Minute)); err != nil {
+		t.Fatalf("late y/N persistAndApprove: %v", err)
+	}
+	if _, ok := store.LookupBySecret("trusted-a", secret); !ok {
+		t.Fatal("y/N after ApproveTrusted must not rotate the trusted secret")
+	}
+	if store.Count() != 1 {
+		t.Fatalf("must not insert the leftover QR phone, count=%d", store.Count())
+	}
+}
+
+func postPairHTTP(t *testing.T, payload pairing.Payload, video *pairing.VideoProfile) (int, map[string]any) {
+	t.Helper()
+	pairBody := map[string]any{
+		"session":  payload.SessionID,
+		"token":    payload.Token,
+		"phone":    map[string]string{"id": "phone-1", "name": "Pixel"},
+		"rtp_port": 50000,
+		"ssrc":     1234,
+	}
+	if video != nil {
+		pairBody["video"] = video
+	}
+	data, err := json.Marshal(pairBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(controlBase(t, payload)+"/pair", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("post /pair: %v", err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode pair: %v", err)
+	}
+	return resp.StatusCode, body
 }
