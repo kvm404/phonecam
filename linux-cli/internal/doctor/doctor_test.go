@@ -18,6 +18,8 @@ type fakeSystem struct {
 	files           map[string]string
 	environment     map[string]string
 	modes           map[string]os.FileMode
+	openers         []string
+	openersErr      error
 }
 
 func (f fakeSystem) LookPath(name string) (string, error) {
@@ -66,6 +68,10 @@ func (f fakeSystem) FileMode(path string) (os.FileMode, error) {
 	return 0, os.ErrNotExist
 }
 
+func (f fakeSystem) DeviceOpeners(path string) ([]string, error) {
+	return f.openers, f.openersErr
+}
+
 func TestDoctorReportsReadyWhenCoreChecksPass(t *testing.T) {
 	report := Run(readySystem(fakeSystem{}))
 
@@ -77,6 +83,15 @@ func TestDoctorReportsReadyWhenCoreChecksPass(t *testing.T) {
 	WriteReport(&out, report)
 	if !strings.Contains(out.String(), "Result: ready") {
 		t.Fatalf("expected ready output, got:\n%s", out.String())
+	}
+
+	caps := findCheck(t, report, "v4l2loopback exclusive_caps")
+	if caps.Status != StatusPass {
+		t.Fatalf("expected exclusive_caps PASS on readySystem, got %s (%s)", caps.Status, caps.Message)
+	}
+	holders := findCheck(t, report, "Virtual camera holders")
+	if holders.Status != StatusPass {
+		t.Fatalf("expected holders PASS on readySystem, got %s (%s)", holders.Status, holders.Message)
 	}
 }
 
@@ -230,7 +245,9 @@ func TestFirewallCheckWarnsWhenUFWActive(t *testing.T) {
 func TestFirewallCheckWarnsWhenFirewalldActive(t *testing.T) {
 	report := Run(readySystem(fakeSystem{
 		commandFailures: map[string]bool{
-			"systemctl is-active --quiet ufw": true,
+			"systemctl is-active --quiet ufw":     true,
+			"firewall-cmd --query-port=47470/tcp": true,
+			"firewall-cmd --query-port=47471/udp": true,
 		},
 	}))
 	check := findCheck(t, report, "Firewall")
@@ -242,6 +259,24 @@ func TestFirewallCheckWarnsWhenFirewalldActive(t *testing.T) {
 	}
 	if !strings.Contains(check.Fix, "firewall-cmd --permanent --add-port=47470/tcp --add-port=47471/udp") {
 		t.Fatalf("expected firewalld allow fix, got %q", check.Fix)
+	}
+}
+
+func TestFirewallCheckInfoWhenFirewalldAlreadyAllows(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		commandFailures: map[string]bool{
+			"systemctl is-active --quiet ufw": true,
+		},
+	}))
+	check := findCheck(t, report, "Firewall")
+	if check.Status != StatusInfo {
+		t.Fatalf("expected INFO when firewalld already allows PhoneCam ports, got %s", check.Status)
+	}
+	if !strings.Contains(check.Message, "already allows PhoneCam ports") {
+		t.Fatalf("expected already-allows message, got %q", check.Message)
+	}
+	if check.Fix != "" {
+		t.Fatalf("expected no firewall fix when ports are already allowed, got %q", check.Fix)
 	}
 }
 
@@ -304,8 +339,10 @@ func readySystem(overrides fakeSystem) fakeSystem {
 			"/dev/video10": true,
 		},
 		files: map[string]string{
-			"/etc/os-release":                     "ID=arch\n",
-			"/sys/class/video4linux/video10/name": "PhoneCam\n",
+			"/etc/os-release":                                    "ID=arch\n",
+			"/sys/class/video4linux/video10/name":                "PhoneCam\n",
+			"/sys/module/v4l2loopback/parameters/video_nr":       "10,-1,-1,-1,-1,-1,-1,-1\n",
+			"/sys/module/v4l2loopback/parameters/exclusive_caps": "Y,N,N,N,N,N,N,N\n",
 		},
 		environment: map[string]string{
 			"XDG_SESSION_TYPE":    "wayland",
@@ -338,6 +375,10 @@ func readySystem(overrides fakeSystem) fakeSystem {
 	if overrides.modes != nil {
 		base.modes = overrides.modes
 	}
+	if overrides.openers != nil {
+		base.openers = overrides.openers
+	}
+	base.openersErr = overrides.openersErr
 	return base
 }
 
@@ -352,6 +393,96 @@ func TestLANPrivacyMentionsUnencryptedRTPAndLocalTrust(t *testing.T) {
 	}
 	if !strings.Contains(check.Message, "trusted pairing does not encrypt RTP") {
 		t.Fatalf("expected local trust disclosure, got %q", check.Message)
+	}
+}
+
+func TestDoctorFailsWhenExclusiveCapsDisabledOnVideo10(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		files: map[string]string{
+			"/sys/module/v4l2loopback/parameters/video_nr":       "0,10,-1,-1,-1,-1,-1,-1\n",
+			"/sys/module/v4l2loopback/parameters/exclusive_caps": "Y,N,N,N,N,N,N,N\n",
+		},
+	}))
+	if !report.HasFailures() {
+		t.Fatal("expected exclusive_caps=N on video10 to fail doctor")
+	}
+	check := findCheck(t, report, "v4l2loopback exclusive_caps")
+	if check.Status != StatusFail {
+		t.Fatalf("expected FAIL, got %s (%s)", check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "exclusive_caps disabled") {
+		t.Fatalf("expected disabled message, got %q", check.Message)
+	}
+	if !strings.Contains(check.Fix, "exclusive_caps=1,1") {
+		t.Fatalf("expected per-device exclusive_caps=1,1 fix, got %q", check.Fix)
+	}
+}
+
+func TestDoctorPassesWhenExclusiveCapsEnabledOnVideo10(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		files: map[string]string{
+			"/sys/module/v4l2loopback/parameters/video_nr":       "0,10,-1,-1,-1,-1,-1,-1\n",
+			"/sys/module/v4l2loopback/parameters/exclusive_caps": "N,Y,N,N,N,N,N,N\n",
+		},
+	}))
+	if report.HasFailures() {
+		t.Fatalf("expected exclusive_caps enabled to pass: %#v", report.Checks)
+	}
+	check := findCheck(t, report, "v4l2loopback exclusive_caps")
+	if check.Status != StatusPass {
+		t.Fatalf("expected PASS, got %s (%s)", check.Status, check.Message)
+	}
+}
+
+func TestDoctorDoesNotFailWhenExclusiveCapsSlotNotFound(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		files: map[string]string{
+			"/sys/module/v4l2loopback/parameters/video_nr":       "0,-1,-1,-1,-1,-1,-1,-1\n",
+			"/sys/module/v4l2loopback/parameters/exclusive_caps": "Y,N,N,N,N,N,N,N\n",
+		},
+	}))
+	if report.HasFailures() {
+		t.Fatalf("unknown exclusive_caps slot must not fail doctor: %#v", report.Checks)
+	}
+	check := findCheck(t, report, "v4l2loopback exclusive_caps")
+	if check.Status == StatusFail {
+		t.Fatalf("expected no FAIL when video10 slot is missing, got %s (%s)", check.Status, check.Message)
+	}
+}
+
+func TestDoctorWarnsWhenExclusiveCapsUnreadable(t *testing.T) {
+	sys := readySystem(fakeSystem{})
+	delete(sys.files, "/sys/module/v4l2loopback/parameters/video_nr")
+	delete(sys.files, "/sys/module/v4l2loopback/parameters/exclusive_caps")
+	report := Run(sys)
+	if report.HasFailures() {
+		t.Fatalf("missing exclusive_caps files must not fail doctor: %#v", report.Checks)
+	}
+	check := findCheck(t, report, "v4l2loopback exclusive_caps")
+	if check.Status != StatusWarn {
+		t.Fatalf("expected WARN when exclusive_caps is unreadable, got %s (%s)", check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "could not read exclusive_caps") {
+		t.Fatalf("expected unreadable message, got %q", check.Message)
+	}
+}
+
+func TestDoctorWarnsWhenVirtualCameraHoldersPresent(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		openers: []string{"gst-launch-1.0", "pipewire"},
+	}))
+	if report.HasFailures() {
+		t.Fatal("leftover holders must not fail doctor")
+	}
+	check := findCheck(t, report, "Virtual camera holders")
+	if check.Status != StatusWarn {
+		t.Fatalf("expected WARN for leftover holders, got %s (%s)", check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "gst-launch-1.0") || !strings.Contains(check.Message, "pipewire") {
+		t.Fatalf("expected holder process names, got %q", check.Message)
+	}
+	if !strings.Contains(check.Fix, "fuser -k /dev/video10") || !strings.Contains(check.Fix, "phonecam stop") {
+		t.Fatalf("expected fuser/stop fix, got %q", check.Fix)
 	}
 }
 

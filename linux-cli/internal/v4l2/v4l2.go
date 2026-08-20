@@ -15,6 +15,13 @@ import (
 // created with.
 const ExpectedCardLabel = "PhoneCam"
 
+// Sysfs parameter files for a loaded v4l2loopback module. exclusive_caps is a
+// per-device CSV aligned with video_nr, not a global boolean.
+const (
+	VideoNrParameterPath       = "/sys/module/v4l2loopback/parameters/video_nr"
+	ExclusiveCapsParameterPath = "/sys/module/v4l2loopback/parameters/exclusive_caps"
+)
+
 const writeAccess = 2
 
 // System abstracts the OS-level access needed to inspect a v4l2 device so it
@@ -78,7 +85,74 @@ func Verify(sys System, device string) error {
 		)
 	}
 
+	videoNr, err1 := sys.ReadFile(VideoNrParameterPath)
+	caps, err2 := sys.ReadFile(ExclusiveCapsParameterPath)
+	if err1 == nil && err2 == nil {
+		n, _ := strconv.Atoi(number)
+		enabled, found := ExclusiveCapsForDevice(string(videoNr), string(caps), n)
+		if found && !enabled {
+			return fmt.Errorf(
+				"%s has exclusive_caps disabled; PhoneCam needs exclusive_caps on this node. Reload a single device with: sudo modprobe v4l2loopback video_nr=%s card_label=%s exclusive_caps=1. For OBS/multi-device, unload then: sudo rmmod v4l2loopback && sudo modprobe v4l2loopback devices=2 video_nr=0,%s card_label=\"OBS Virtual Camera,PhoneCam\" exclusive_caps=1,1",
+				device, number, ExpectedCardLabel, number,
+			)
+		}
+	}
+
 	return nil
+}
+
+// ExclusiveCapsForDevice reports whether exclusive_caps is enabled for v4l2
+// device number n using the video_nr and exclusive_caps sysfs parameter
+// strings. found is false if n is not listed or the slices cannot be aligned.
+func ExclusiveCapsForDevice(videoNr, exclusiveCaps string, n int) (enabled, found bool) {
+	nrs := splitCSV(videoNr)
+	caps := splitCSV(exclusiveCaps)
+	if len(nrs) == 0 || len(caps) == 0 {
+		return false, false
+	}
+
+	idx := -1
+	for i, raw := range nrs {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v == -1 {
+			continue
+		}
+		if v == n {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx >= len(caps) {
+		return false, false
+	}
+	return exclusiveCapsTruthy(caps[idx]), true
+}
+
+func splitCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	for len(parts) > 0 && strings.TrimSpace(parts[len(parts)-1]) == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+func exclusiveCapsTruthy(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "y", "1", "true":
+		return true
+	default:
+		return false
+	}
 }
 
 // deviceNumber validates a /dev/video<N> path and returns the numeric suffix.

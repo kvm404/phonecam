@@ -640,14 +640,36 @@ func outputSnippet(s string) string {
 	if s == "" {
 		return ""
 	}
+
+	const reasonPrefix = "streaming stopped, reason"
+	first := s
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
+		first = strings.TrimSpace(s[:i])
 	}
-	const max = 200
-	if len(s) > max {
-		return s[:max] + "…"
+
+	reason := ""
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if j := strings.Index(line, reasonPrefix); j >= 0 {
+			reason = strings.TrimSpace(line[j:])
+			break
+		}
 	}
-	return s
+
+	out := first
+	if reason != "" && !strings.Contains(out, reason) {
+		if out == "" {
+			out = reason
+		} else {
+			out = out + "; " + reason
+		}
+	}
+
+	const max = 240
+	if len(out) > max {
+		return out[:max] + "…"
+	}
+	return out
 }
 
 func (r Runtime) runReceiver(ctx context.Context, gate *rtp.Gate, video pairing.VideoProfile, device string) error {
