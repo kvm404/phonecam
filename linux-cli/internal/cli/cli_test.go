@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -53,6 +54,10 @@ func (f fakeSystem) Getenv(name string) string {
 
 func (f fakeSystem) FileMode(path string) (os.FileMode, error) {
 	return 0, os.ErrNotExist
+}
+
+func (f fakeSystem) DeviceOpeners(path string) ([]string, error) {
+	return nil, nil
 }
 
 func TestRunShowsHelpWithoutArgs(t *testing.T) {
@@ -284,11 +289,23 @@ func TestInstallMentionsFirewallAndPersistence(t *testing.T) {
 		"firewall-cmd --permanent --add-port=47470/tcp --add-port=47471/udp",
 		"echo v4l2loopback | sudo tee /etc/modules-load.d/v4l2loopback.conf",
 		`echo "options v4l2loopback video_nr=10 card_label=PhoneCam exclusive_caps=1" | sudo tee /etc/modprobe.d/v4l2loopback.conf`,
+		"exclusive_caps=1,1",
+		"devices=2",
+		"rmmod",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected install output to contain %q, got:\n%s", expected, output)
 		}
 	}
+}
+
+func TestInterruptSignalsIncludeSIGHUP(t *testing.T) {
+	for _, sig := range interruptSignals {
+		if sig == syscall.SIGHUP {
+			return
+		}
+	}
+	t.Fatal("SIGHUP must cancel start/smoke when the terminal hangs up")
 }
 
 func TestRunInstallPrioritizesDetectedDistro(t *testing.T) {

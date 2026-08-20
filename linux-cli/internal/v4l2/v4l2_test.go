@@ -140,6 +140,45 @@ func TestVerify(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:   "exclusive_caps disabled on video10 with OBS-style CSV",
+			device: "/dev/video10",
+			sys: fakeSystem{
+				exists:   map[string]bool{"/dev/video10": true},
+				canWrite: map[string]bool{"/dev/video10": true},
+				files: map[string][]byte{
+					"/sys/class/video4linux/video10/name":                []byte("PhoneCam\n"),
+					"/sys/module/v4l2loopback/parameters/video_nr":       []byte("0,10,-1,-1,-1,-1,-1,-1\n"),
+					"/sys/module/v4l2loopback/parameters/exclusive_caps": []byte("Y,N,N,N,N,N,N,N\n"),
+				},
+			},
+			wantErr: true,
+			want:    []string{"exclusive_caps disabled", "/dev/video10", "this node", "exclusive_caps=1,1"},
+		},
+		{
+			name:   "exclusive_caps enabled at video10 index",
+			device: "/dev/video10",
+			sys: fakeSystem{
+				exists:   map[string]bool{"/dev/video10": true},
+				canWrite: map[string]bool{"/dev/video10": true},
+				files: map[string][]byte{
+					"/sys/class/video4linux/video10/name":                []byte("PhoneCam\n"),
+					"/sys/module/v4l2loopback/parameters/video_nr":       []byte("0,10,-1,-1,-1,-1,-1,-1\n"),
+					"/sys/module/v4l2loopback/parameters/exclusive_caps": []byte("N,Y,N,N,N,N,N,N\n"),
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:   "exclusive_caps files missing skips check",
+			device: "/dev/video10",
+			sys: fakeSystem{
+				exists:   map[string]bool{"/dev/video10": true},
+				canWrite: map[string]bool{"/dev/video10": true},
+				files:    map[string][]byte{"/sys/class/video4linux/video10/name": []byte("PhoneCam\n")},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -193,4 +232,105 @@ type errReadSystem struct {
 
 func (errReadSystem) ReadFile(path string) ([]byte, error) {
 	return nil, errors.New("permission denied")
+}
+
+func TestExclusiveCapsForDevice(t *testing.T) {
+	tests := []struct {
+		name          string
+		videoNr       string
+		exclusiveCaps string
+		n             int
+		wantEnabled   bool
+		wantFound     bool
+	}{
+		{
+			name:          "OBS first-device-only exclusive_caps",
+			videoNr:       "0,10,-1,-1,-1,-1,-1,-1\n",
+			exclusiveCaps: "Y,N,N,N,N,N,N,N\n",
+			n:             10,
+			wantEnabled:   false,
+			wantFound:     true,
+		},
+		{
+			name:          "video10 enabled at matching index",
+			videoNr:       "0,10,-1,-1",
+			exclusiveCaps: "N,Y,N,N",
+			n:             10,
+			wantEnabled:   true,
+			wantFound:     true,
+		},
+		{
+			name:          "single-device Y",
+			videoNr:       "10,-1,-1,-1,-1,-1,-1,-1",
+			exclusiveCaps: "Y,N,N,N,N,N,N,N",
+			n:             10,
+			wantEnabled:   true,
+			wantFound:     true,
+		},
+		{
+			name:          "trailing empty fields",
+			videoNr:       "0,10,-1,",
+			exclusiveCaps: "1,0,0,",
+			n:             10,
+			wantEnabled:   false,
+			wantFound:     true,
+		},
+		{
+			name:          "truthy 1 and true",
+			videoNr:       "10",
+			exclusiveCaps: "true",
+			n:             10,
+			wantEnabled:   true,
+			wantFound:     true,
+		},
+		{
+			name:          "falsy 0",
+			videoNr:       "10",
+			exclusiveCaps: "0",
+			n:             10,
+			wantEnabled:   false,
+			wantFound:     true,
+		},
+		{
+			name:          "device not in list",
+			videoNr:       "0,-1,-1",
+			exclusiveCaps: "Y,N,N",
+			n:             10,
+			wantEnabled:   false,
+			wantFound:     false,
+		},
+		{
+			name:          "slices cannot align",
+			videoNr:       "0,10,-1",
+			exclusiveCaps: "Y",
+			n:             10,
+			wantEnabled:   false,
+			wantFound:     false,
+		},
+		{
+			name:          "unused -1 slots are not a match",
+			videoNr:       "-1,10",
+			exclusiveCaps: "N,Y",
+			n:             10,
+			wantEnabled:   true,
+			wantFound:     true,
+		},
+		{
+			name:          "empty sysfs",
+			videoNr:       "\n",
+			exclusiveCaps: "\n",
+			n:             10,
+			wantEnabled:   false,
+			wantFound:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			enabled, found := ExclusiveCapsForDevice(tc.videoNr, tc.exclusiveCaps, tc.n)
+			if enabled != tc.wantEnabled || found != tc.wantFound {
+				t.Fatalf("got enabled=%v found=%v, want enabled=%v found=%v", enabled, found, tc.wantEnabled, tc.wantFound)
+			}
+		})
+	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/kvm404/phonecam/linux-cli/internal/rtp"
 	"github.com/kvm404/phonecam/linux-cli/internal/trust"
+	"github.com/kvm404/phonecam/linux-cli/internal/v4l2"
 )
 
 const (
@@ -28,6 +29,7 @@ type System interface {
 	ReadFile(path string) ([]byte, error)
 	Getenv(name string) string
 	FileMode(path string) (os.FileMode, error)
+	DeviceOpeners(path string) ([]string, error)
 }
 
 type Check struct {
@@ -91,6 +93,10 @@ func Run(sys System) Report {
 			Fix:     fix,
 		})
 		checks = append(checks, virtualCameraIdentityCheck(sys))
+		if sys.Exists("/sys/module/v4l2loopback") {
+			checks = append(checks, exclusiveCapsCheck(sys))
+		}
+		checks = append(checks, virtualCameraHoldersCheck(sys))
 	} else {
 		checks = append(checks, Check{
 			Name:    "PhoneCam virtual camera",
@@ -230,6 +236,67 @@ func virtualCameraIdentityCheck(sys System) Check {
 	}
 }
 
+func exclusiveCapsCheck(sys System) Check {
+	const name = "v4l2loopback exclusive_caps"
+	videoNr, err1 := sys.ReadFile(v4l2.VideoNrParameterPath)
+	caps, err2 := sys.ReadFile(v4l2.ExclusiveCapsParameterPath)
+	if err1 != nil || err2 != nil {
+		return Check{
+			Name:    name,
+			Status:  StatusWarn,
+			Message: "could not read exclusive_caps",
+			Fix:     "Confirm /sys/module/v4l2loopback/parameters/{video_nr,exclusive_caps} are readable.",
+		}
+	}
+
+	enabled, found := v4l2.ExclusiveCapsForDevice(string(videoNr), string(caps), 10)
+	if !found {
+		return Check{
+			Name:    name,
+			Status:  StatusWarn,
+			Message: "could not determine exclusive_caps for /dev/video10",
+			Fix:     "Confirm v4l2loopback was loaded with video_nr=10.",
+		}
+	}
+	if !enabled {
+		return Check{
+			Name:    name,
+			Status:  StatusFail,
+			Message: "/dev/video10 has exclusive_caps disabled; PhoneCam needs exclusive_caps on this node",
+			Fix:     `Reload a single device with: sudo modprobe v4l2loopback video_nr=10 card_label=PhoneCam exclusive_caps=1. For OBS/multi-device, unload then: sudo rmmod v4l2loopback && sudo modprobe v4l2loopback devices=2 video_nr=0,10 card_label="OBS Virtual Camera,PhoneCam" exclusive_caps=1,1`,
+		}
+	}
+	return Check{
+		Name:    name,
+		Status:  StatusPass,
+		Message: "/dev/video10 has exclusive_caps enabled",
+	}
+}
+
+func virtualCameraHoldersCheck(sys System) Check {
+	names, err := sys.DeviceOpeners("/dev/video10")
+	if err != nil {
+		return Check{
+			Name:    "Virtual camera holders",
+			Status:  StatusWarn,
+			Message: "could not inspect processes holding /dev/video10",
+		}
+	}
+	if len(names) == 0 {
+		return Check{
+			Name:    "Virtual camera holders",
+			Status:  StatusPass,
+			Message: "no other process has /dev/video10 open",
+		}
+	}
+	return Check{
+		Name:    "Virtual camera holders",
+		Status:  StatusWarn,
+		Message: "/dev/video10 is already open by " + strings.Join(names, ", "),
+		Fix:     "Close those apps or run fuser -k /dev/video10, then phonecam stop if a leftover receiver is from PhoneCam.",
+	}
+}
+
 func desktopSessionCheck(sys System) Check {
 	session := sys.Getenv("XDG_SESSION_TYPE")
 	desktop := sys.Getenv("XDG_CURRENT_DESKTOP")
@@ -297,6 +364,15 @@ func firewallCheck(sys System) Check {
 		}
 	}
 	if sys.RunCommand("systemctl", "is-active", "--quiet", "firewalld") == nil {
+		tcpOK := sys.RunCommand("firewall-cmd", "--query-port=47470/tcp") == nil
+		udpOK := sys.RunCommand("firewall-cmd", "--query-port=47471/udp") == nil
+		if tcpOK && udpOK {
+			return Check{
+				Name:    "Firewall",
+				Status:  StatusInfo,
+				Message: "firewalld is active and already allows PhoneCam ports (TCP 47470, UDP 47471)",
+			}
+		}
 		return Check{
 			Name:    "Firewall",
 			Status:  StatusWarn,

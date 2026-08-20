@@ -461,6 +461,31 @@ func TestRunDefaultsVirtualCameraAndPassesItToReceiver(t *testing.T) {
 	}
 }
 
+func TestOutputSnippetIncludesNotNegotiated(t *testing.T) {
+	stderr := `ERROR: from element /GstPipeline:pipeline0/GstUDPSrc:udpsrc0: Internal data stream error.
+Additional debug info:
+../libs/gst/base/gstbasesrc.c(3132): gst_base_src_loop (): /GstPipeline:pipeline0/GstUDPSrc:udpsrc0:
+streaming stopped, reason not-negotiated (-4)
+`
+	got := outputSnippet(stderr)
+	if !strings.Contains(got, "not-negotiated") {
+		t.Fatalf("expected snippet to include not-negotiated, got %q", got)
+	}
+	if strings.ContainsAny(got, "\n") {
+		t.Fatalf("snippet must be one line, got %q", got)
+	}
+	if !strings.Contains(got, "Internal data stream error") {
+		t.Fatalf("expected first ERROR line in snippet, got %q", got)
+	}
+}
+
+func TestOutputSnippetKeepsSingleLine(t *testing.T) {
+	got := outputSnippet("gst-launch-1.0: syntax error")
+	if got != "gst-launch-1.0: syntax error" {
+		t.Fatalf("expected unchanged single-line snippet, got %q", got)
+	}
+}
+
 func TestRunRestartsReceiverAfterCrash(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	receiver := &flakyThenBlockReceiver{fails: 1, stderr: "gst-launch-1.0: syntax error"}

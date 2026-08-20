@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +25,13 @@ import (
 var version = "0.2.0-rc.1"
 
 const writeAccess = 2
+
+// interruptSignals cancel start/smoke. SIGHUP is included so closing the
+// terminal tears down gst-launch via CommandContext instead of leaving it
+// holding /dev/video10.
+var interruptSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+
+const maxDeviceOpeners = 8
 
 type OSSystem struct{}
 
@@ -64,6 +72,76 @@ func (OSSystem) FileMode(path string) (os.FileMode, error) {
 	return info.Mode().Perm(), nil
 }
 
+func (OSSystem) DeviceOpeners(path string) ([]string, error) {
+	resolved, _ := filepath.EvalSymlinks(path)
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+
+	self := os.Getpid()
+	seen := make(map[string]struct{})
+	var names []string
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		fdDir := filepath.Join("/proc", entry.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		holds := false
+		for _, fd := range fds {
+			link, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+			if err != nil {
+				continue
+			}
+			if sameDevicePath(link, path, resolved) {
+				holds = true
+				break
+			}
+		}
+		if !holds {
+			continue
+		}
+		name := strings.TrimSpace(string(readProcFile(filepath.Join("/proc", entry.Name(), "comm"))))
+		if name == "" {
+			name = "pid:" + entry.Name()
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+		if len(names) >= maxDeviceOpeners {
+			break
+		}
+	}
+	return names, nil
+}
+
+func sameDevicePath(link, path, resolved string) bool {
+	if link == path || (resolved != "" && link == resolved) {
+		return true
+	}
+	if linkResolved, err := filepath.EvalSymlinks(link); err == nil {
+		if linkResolved == path || (resolved != "" && linkResolved == resolved) {
+			return true
+		}
+	}
+	return false
+}
+
+func readProcFile(path string) []byte {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
 func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr io.Writer) int {
 	_ = ctx
 
@@ -89,7 +167,7 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 	case "start":
 		return runStart(ctx, args[1:], stdout, stderr)
 	case "smoke":
-		runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		runCtx, stop := signal.NotifyContext(ctx, interruptSignals...)
 		defer stop()
 		err := smoke.New(nil, nil, nil, nil, nil, nil).Run(runCtx, smoke.Config{Device: smoke.DefaultDevice}, stdout)
 		if err != nil && !errors.Is(err, context.Canceled) {
@@ -148,7 +226,7 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 	}
 
-	runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	runCtx, stop := signal.NotifyContext(ctx, interruptSignals...)
 	defer stop()
 	err := start.New(start.OSSystem{}, nil, nil, nil).Run(runCtx, start.Config{
 		VirtualCamera: start.DefaultVirtualCamera,
@@ -298,6 +376,16 @@ After installing v4l2loopback, load a PhoneCam-compatible virtual camera:
 Make the virtual camera load automatically on every boot:
   echo v4l2loopback | sudo tee /etc/modules-load.d/v4l2loopback.conf
   echo "options v4l2loopback video_nr=10 card_label=PhoneCam exclusive_caps=1" | sudo tee /etc/modprobe.d/v4l2loopback.conf
+
+OBS / extra loopback devices:
+  A second modprobe video_nr=10 is a no-op if v4l2loopback is already loaded
+  (OBS typically uses /dev/video0). exclusive_caps=1 with devices=2 only sets
+  the first device on current v4l2loopback; PhoneCam needs the per-device list.
+  Reload both cameras with:
+    sudo rmmod v4l2loopback
+    sudo modprobe v4l2loopback devices=2 video_nr=0,10 card_label="OBS Virtual Camera,PhoneCam" exclusive_caps=1,1
+  Persist that layout:
+    echo 'options v4l2loopback devices=2 video_nr=0,10 card_label="OBS Virtual Camera,PhoneCam" exclusive_caps=1,1' | sudo tee /etc/modprobe.d/v4l2loopback.conf
 
 Allow PhoneCam through your firewall (fixed default ports 47470/tcp, 47471/udp):
   ufw:       sudo ufw allow 47470/tcp && sudo ufw allow 47471/udp
