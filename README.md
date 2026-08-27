@@ -68,5 +68,6 @@ straight from phone to laptop.
 
 ## Docs & License
 
-Design and product docs are in [`docs/`](docs/). Licensed under
+Design and product docs are in [`docs/`](docs/). Omarchy bar plugin
+design: [`docs/omarchy-plugin.md`](docs/omarchy-plugin.md). Licensed under
 [MIT](LICENSE).

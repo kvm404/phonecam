@@ -29,6 +29,8 @@ Design: [`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.
 ## v0.3: Desktop Experience
 
 - Tray helper.
+- Omarchy bar plugin (design: [`docs/omarchy-plugin.md`](omarchy-plugin.md);
+  spec: [`docs/omarchy-plugin-design.md`](omarchy-plugin-design.md)).
 - Systemd user background mode.
 - Better OBS profiles.
 - Phone microphone support.
