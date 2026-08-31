@@ -154,4 +154,31 @@ test("startArgv never includes --require-approval", function() {
   assert.ok(argv.indexOf("--require-approval") === -1)
 })
 
+test("parseSessionRecord keeps device path", function() {
+  const rec = Model.parseSessionRecord(JSON.stringify({
+    pid: 12,
+    control_port: 47470,
+    rtp_port: 47471,
+    session: "abc",
+    device: "/dev/video10"
+  }))
+  assert.strictEqual(rec.device, "/dev/video10")
+})
+
+test("pickCameraDevice prefers PhoneCam label then video_nr", function() {
+  const inputs = [
+    { id: "/dev/video0", description: "HP TrueVision" },
+    { id: "/dev/video10", description: "PhoneCam" }
+  ]
+  const hit = Model.pickCameraDevice(inputs, "/dev/video10", "PhoneCam")
+  assert.strictEqual(hit.description, "PhoneCam")
+  const byPath = Model.pickCameraDevice(
+    [{ id: "v4l2:/dev/video10", description: "Dummy" }],
+    "/dev/video10",
+    "PhoneCam"
+  )
+  assert.strictEqual(byPath.id, "v4l2:/dev/video10")
+  assert.strictEqual(Model.pickCameraDevice(inputs, "", "Nope"), null)
+})
+
 console.log("all tests passed")

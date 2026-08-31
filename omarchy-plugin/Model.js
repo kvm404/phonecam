@@ -235,8 +235,31 @@ function parseSessionRecord(raw) {
     pid: parseInt(obj.pid, 10) || 0,
     control_port: control,
     rtp_port: rtp,
-    session: String(obj.session || "")
+    session: String(obj.session || ""),
+    device: String(obj.device || "")
   }
+}
+
+function pickCameraDevice(inputs, preferredDevice, label) {
+  if (!inputs || inputs.length === undefined) return null
+  var want = String(preferredDevice || "").replace(/^\/dev\//, "")
+  var name = String(label || "PhoneCam")
+  var i
+  for (i = 0; i < inputs.length; i++) {
+    var d = inputs[i]
+    if (!d) continue
+    var desc = String(d.description || "")
+    if (desc.indexOf(name) !== -1) return d
+  }
+  if (want === "") return null
+  for (i = 0; i < inputs.length; i++) {
+    var cam = inputs[i]
+    if (!cam) continue
+    var id = String(cam.id || "")
+    var title = String(cam.description || "")
+    if (id.indexOf(want) !== -1 || title.indexOf(want) !== -1) return cam
+  }
+  return null
 }
 
 if (typeof module !== "undefined") {
@@ -263,6 +286,7 @@ if (typeof module !== "undefined") {
     videoLabel: videoLabel,
     phaseLabel: phaseLabel,
     parseTrust: parseTrust,
-    parseSessionRecord: parseSessionRecord
+    parseSessionRecord: parseSessionRecord,
+    pickCameraDevice: pickCameraDevice
   }
 }

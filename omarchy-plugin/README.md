@@ -15,6 +15,9 @@ omarchy plugin enable io.github.kvm404.phonecam
 `install.sh` copies into `~/.config/omarchy/plugins/io.github.kvm404.phonecam`
 and prints the enable command. It does not enable the plugin itself.
 
+While the stream is live, the open panel shows a 16:9 preview of PhoneCam.
+The camera is released when you close the panel.
+
 Needs `phonecam` on PATH (or `~/.local/bin/phonecam`), `curl`, `setpriv`,
 `qrencode`, and Omarchy 4+ with Quickshell. Press Start in the panel; the
 plugin does not auto-start at login. Scan the QR with the PhoneCam Android

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -47,6 +48,10 @@ Panel {
     return list
   }
   readonly property bool showQr: phase === "waiting" && svc && svc.qrSize > 0 && !svc.pairingExpired
+  readonly property bool previewWanted: opened && (phase === "live" || phase === "silent")
+  readonly property string sessionDevice: svc && svc.sessionRecord && svc.sessionRecord.device
+    ? String(svc.sessionRecord.device)
+    : "/dev/video10"
 
   function pushSettings() {
     if (svc && "settings" in svc) svc.settings = settings
@@ -56,6 +61,14 @@ Panel {
     if (!svc) return
     if (svc.canStop) svc.stop()
     else svc.start()
+  }
+
+  function selectedCamera() {
+    var inputs = mediaDevices.videoInputs
+    var list = []
+    if (!inputs) return null
+    for (var i = 0; i < inputs.length; i++) list.push(inputs[i])
+    return Model.pickCameraDevice(list, root.sessionDevice, "PhoneCam")
   }
 
   onSettingsChanged: pushSettings()
@@ -73,6 +86,24 @@ Panel {
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  MediaDevices {
+    id: mediaDevices
+  }
+
+  CaptureSession {
+    camera: previewCamera
+    videoOutput: previewOut
+  }
+
+  Camera {
+    id: previewCamera
+    cameraDevice: {
+      var inputs = mediaDevices.videoInputs
+      return root.selectedCamera()
+    }
+    active: root.previewWanted && !!cameraDevice
+  }
 
   IpcHandler {
     target: root.ipcTarget
@@ -285,6 +316,36 @@ Panel {
               text: root.phase === "live" ? "LIVE" : "SILENT"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+
+            Rectangle {
+              id: previewFrame
+              width: parent.width
+              height: Math.round(width * 9 / 16)
+              radius: Style.cornerRadius
+              color: "#111111"
+              clip: true
+
+              VideoOutput {
+                id: previewOut
+                anchors.fill: parent
+                fillMode: VideoOutput.PreserveAspectFit
+                visible: previewCamera.active && previewCamera.error === Camera.NoError
+              }
+
+              Text {
+                visible: !previewOut.visible
+                anchors.centerIn: parent
+                width: parent.width - Style.space(16)
+                text: previewCamera.error !== Camera.NoError
+                  ? previewCamera.errorString
+                  : (root.previewWanted ? "Waiting for PhoneCam frames" : "")
+                color: "#bbbbbb"
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignHCenter
+              }
             }
 
             Text {
