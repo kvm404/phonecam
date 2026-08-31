@@ -33,7 +33,7 @@ function doctorBlocking(checks) {
   if (!(checks instanceof Array)) return false
   for (var i = 0; i < checks.length; i++) {
     var check = checks[i]
-    if (check && check.status === "FAIL" && isBlockingDoctorName(check.name)) return true
+    if (check && check.status === "FAIL") return true
   }
   return false
 }

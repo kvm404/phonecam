@@ -87,13 +87,8 @@ start, new token), not a fake Refresh.
 
 ## Doctor
 
-Blocking Start only when a FAIL check **Name** is exactly one of:
-
-- `v4l2loopback install`
-- `v4l2loopback module`
-- `PhoneCam virtual camera`
-
-`Virtual camera holders` is WARN and does not block.
+Blocking Start when `phonecam doctor` reports any **FAIL** (same as CLI
+exit 1). WARN/INFO (holders, firewall, LAN privacy) do not block.
 
 ## Settings
 

@@ -48,13 +48,16 @@ test("blocking names are an exact list", function() {
   assert.strictEqual(Model.isBlockingDoctorName("Virtual camera holders"), false)
   assert.strictEqual(Model.isBlockingDoctorName("PhoneCam virtual camera identity"), false)
   assert.strictEqual(Model.doctorBlocking([
-    { status: "FAIL", name: "Virtual camera holders" }
-  ]), false)
+    { status: "FAIL", name: "GStreamer launcher" }
+  ]), true)
   assert.strictEqual(Model.doctorBlocking([
     { status: "WARN", name: "v4l2loopback module" }
   ]), false)
   assert.strictEqual(Model.doctorBlocking([
     { status: "FAIL", name: "v4l2loopback module" }
+  ]), true)
+  assert.strictEqual(Model.doctorBlocking([
+    { status: "FAIL", name: "Virtual camera holders" }
   ]), true)
 })
 
