@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Read pairing JSON from stdin (or the first argument) and print a square
+# 0/1 QR module matrix. No meta header. Matches omarchy-network-qr collapse.
+
+set -euo pipefail
+
+if ! command -v qrencode >/dev/null 2>&1; then
+  echo "phonecam-qr: qrencode not found" >&2
+  exit 1
+fi
+
+if [[ $# -ge 1 ]]; then
+  payload=$1
+else
+  payload=$(cat)
+fi
+
+[[ -n $payload ]] || { echo "phonecam-qr: empty payload" >&2; exit 1; }
+
+ascii=$(printf '%s' "$payload" | qrencode --type ASCII --margin 4 --level L --output -)
+while IFS= read -r line; do
+  [[ -n $line ]] || continue
+  row=
+  for ((column = 0; column < ${#line}; column += 2)); do
+    [[ ${line:column:2} == *#* ]] && row+=1 || row+=0
+  done
+  printf '%s\n' "$row"
+done <<<"$ascii"
