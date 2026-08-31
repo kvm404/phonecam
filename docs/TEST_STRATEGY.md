@@ -100,12 +100,7 @@ end-to-end manual and eventually automated smoke path.
 
 ## Release Gate
 
-v0.1 should not be tagged until:
-
-- the latency target is measured and documented,
-- 90-minute stability is measured and documented,
-- benchmark results are recorded in `docs/BENCHMARKS.md`,
-- the app compatibility matrix is filled for at least Arch on Wayland/Hyprland,
-- `phonecam doctor` covers the common failure cases,
-- install docs exist for Arch, with Fedora and Ubuntu/Debian either complete or
-  explicitly marked as pending.
+v0.1 and v0.2.0 shipped. A latency lab, 90-minute stability writeup, filled
+`docs/BENCHMARKS.md`, and a published compatibility matrix are **not**
+scheduled. `phonecam doctor` covers common failure cases; install docs are
+Arch-first.

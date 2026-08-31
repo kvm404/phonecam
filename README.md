@@ -53,7 +53,7 @@ phonecam start      # on the laptop — shows a QR code
 **v0.2.0.** Working Wi-Fi webcam with QR pairing, trusted reconnect, and
 in-session recovery. Verified on Arch Linux + vivo, and Fedora KDE aarch64 +
 OBS coexistence + Motorola Edge 60 Fusion. Other distros and phones are still
-welcome. Video only for now (no audio), and the LAN stream is **unencrypted**,
+welcome. Video only (no audio), and the LAN stream is **unencrypted**,
 so use it on trusted networks only. There is no account, cloud, or relay —
 video goes straight from phone to laptop.
 
