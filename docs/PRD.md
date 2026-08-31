@@ -48,20 +48,14 @@ The v0.1 success bar is:
 14. As a Linux user, I want `phonecam doctor` to check app visibility, so that I can diagnose why a meeting app does not show PhoneCam.
 15. As a Wayland user, I want desktop-specific notes when relevant, so that I understand PipeWire, browser, and sandbox limitations.
 16. As an Arch user, I want Arch-first docs, so that I can install kernel modules and media dependencies correctly.
-17. As a Fedora user, I want Fedora docs, so that I can handle package names, kernel modules, and firewall defaults.
-18. As an Ubuntu/Debian user, I want distro docs, so that I can install dependencies without guessing package names.
-19. As a user with weak Wi-Fi, I want late frames dropped instead of buffered indefinitely, so that video stays live instead of drifting behind.
-20. As a meeting participant, I want stable long sessions, so that the camera does not fail during a 90-minute call.
-21. As an Android user, I want a preview before streaming, so that I can frame the camera correctly.
-22. As an Android user, I want a clear Start/Stop control, so that I control when video is transmitted.
-23. As an Android user, I want battery and thermal status, so that I can react before long meetings degrade.
-24. As a Linux user, I want `phonecam status`, so that I can see whether the receiver, stream, and virtual camera are healthy.
-25. As a Linux user, I want `phonecam stop`, so that I can reliably shut down the receiver and media pipeline.
-26. As a Linux user, I want optional systemd user service support later, so that PhoneCam can run in the background.
-27. As a developer, I want media hot paths delegated to GStreamer, so that the Go CLI stays focused on product behavior.
-28. As a maintainer, I want measurable latency and stability targets, so that regressions are caught before release.
-29. As a maintainer, I want a compatibility matrix, so that claims about Meet, Zoom, Discord, OBS, and browsers are verified.
-30. As a future contributor, I want clear architecture docs, so that new features do not accidentally compromise latency or compatibility.
+17. As a user with weak Wi-Fi, I want late frames dropped instead of buffered indefinitely, so that video stays live instead of drifting behind.
+18. As a meeting participant, I want stable long sessions, so that the camera does not fail during a 90-minute call.
+19. As an Android user, I want a preview before streaming, so that I can frame the camera correctly.
+20. As an Android user, I want a clear Start/Stop control, so that I control when video is transmitted.
+21. As a Linux user, I want `phonecam status`, so that I can see whether the receiver, stream, and virtual camera are healthy.
+22. As a Linux user, I want `phonecam stop`, so that I can reliably shut down the receiver and media pipeline.
+23. As a developer, I want media hot paths delegated to GStreamer, so that the Go CLI stays focused on product behavior.
+24. As a future contributor, I want clear architecture docs, so that new features do not accidentally compromise latency or compatibility.
 
 ## Implementation Decisions
 
@@ -86,9 +80,9 @@ The v0.1 success bar is:
   implementation spike.
 - Local video relay through the cloud is out of scope for v0.1.
 - Optional STUN/WebRTC-style traversal is out of scope for v0.1.
-- Audio is out of scope for v0.1.
-- USB transport is out of scope for v0.1 and remains out of scope until v1.0.
-- Multi-phone support is out of scope for v0.1.
+- Audio is out of scope.
+- USB transport is out of scope.
+- Multi-phone support is out of scope.
 - Persistent trusted-device pairing is out of scope for v0.1 and is a v0.2
   goal; see [`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.md).
 
@@ -114,15 +108,16 @@ The v0.1 success bar is:
 
 - iOS support.
 - Phone microphone/audio.
-- USB transport (until v1.0).
-- Polished GUI tray.
+- USB transport.
+- GUI tray.
+- systemd user service.
 - Multi-phone support.
-- Advanced camera controls (torch stays Later; front/back flip and the
-  720p/540p/360p selector shipped in v0.1).
+- Torch, extra lenses, 15 fps Home toggle.
+- `POST /telemetry`, mDNS, latency measurement harness.
 - Cloud TURN relay.
 - Remote-network usage.
 - Browser-native phone capture.
-- Production distro packaging.
+- Distro packages.
 
 ## Further Notes
 

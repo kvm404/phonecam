@@ -1,5 +1,9 @@
 # PhoneCam Linux Roadmap
 
+**v0.2.0 is the product.** Shipped slices below are history. There is no v0.3,
+v1.0, or Later bucket. USB, audio, tray, systemd, torch, distro packages, and
+the other unscheduled items that used to live here are cancelled — not deferred.
+
 ## v0.1: Local Wi-Fi MVP
 
 - Android app.
@@ -13,8 +17,6 @@
 - 720p30 target.
 - `phonecam start`, `status`, `stop`, `doctor`, and initial `install`.
 - Arch-first install docs.
-- Fedora and Ubuntu/Debian docs after Arch path is proven.
-- Compatibility validation for Meet, Zoom, Discord, OBS, Chromium, and Firefox.
 
 ## v0.2: Reliability And Controls
 
@@ -25,31 +27,3 @@ Design: [`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.
 - Better degraded-network behavior (stay live under loss).
 - Camera-switch polish (front/back flip already shipped; persist facing and fail safe).
 - Resolution leftovers (720p/540p/360p selector already shipped; bitrate-per-preset already shipped).
-
-## v0.3: Desktop Experience
-
-- Tray helper.
-- Systemd user background mode.
-- Better OBS profiles.
-- Phone microphone support.
-- Audio sync handling.
-- More polished install helper.
-
-## v1.0: Stable Release
-
-- Stable Wi-Fi and USB support.
-- Polished Android app.
-- Polished CLI/tray experience.
-- Distro packages.
-- Complete Arch/Fedora/Ubuntu docs.
-- Reliable long-session behavior.
-- Published compatibility matrix.
-
-## Later (unscheduled)
-
-Deferred from v0.2; not part of the v0.3 desktop slice.
-
-- Torch toggle.
-- Latency measurement harness (`docs/BENCHMARKS.md` stays a template until then).
-- 15 fps Home toggle (dropped from v0.2; bitrate-per-preset already shipped).
-

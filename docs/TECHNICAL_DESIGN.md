@@ -2,8 +2,8 @@
 
 This document is the v0.1 architecture. v0.2 scope and implementation
 contracts live in [`docs/v0.2-reliability-and-controls.md`](v0.2-reliability-and-controls.md)
-and [`docs/ROADMAP.md`](ROADMAP.md). USB transport stays a non-goal until v1.0.
-Torch and a latency measurement harness are unscheduled (Later), not v0.2.
+and [`docs/ROADMAP.md`](ROADMAP.md). USB, audio, tray, torch, systemd, and a
+latency measurement harness are non-goals.
 
 ## Goals
 
@@ -19,8 +19,10 @@ Torch and a latency measurement harness are unscheduled (Later), not v0.2.
 - Remote-network traversal.
 - WebRTC signaling.
 - GUI tray.
+- systemd user service.
 - Multi-camera or multi-phone sessions.
-- Advanced camera controls.
+- Torch and other advanced camera controls.
+- Distro packages.
 
 ## Architecture
 
@@ -49,14 +51,7 @@ Torch and a latency measurement harness are unscheduled (Later), not v0.2.
 - Capture 720p30 frames with CameraX.
 - Encode H.264 using MediaCodec hardware encode.
 - Stream H.264 over RTP/UDP to the Linux receiver.
-- Send health metadata over the control channel:
-  - battery level,
-  - charging state,
-  - thermal status,
-  - selected camera,
-  - current resolution/FPS,
-  - encoder bitrate,
-  - dropped frame counters when available.
+- Report selected camera, resolution, and FPS on `/pair` and `/reconnect`.
 
 ### Android H.264/RTP Sender
 
@@ -135,8 +130,7 @@ The CLI should prefer a stable `video_nr=10` when available, but it must detect
 conflicts and either select another device number or explain the conflict.
 
 The compatibility-first pixel format is YUYV/YUY2 at 1280x720 30 FPS. Additional
-formats such as MJPEG may be considered only after the compatibility matrix
-shows a clear need.
+formats such as MJPEG are out of scope unless a meeting app cannot consume YUY2.
 
 Permission handling should be explicit:
 

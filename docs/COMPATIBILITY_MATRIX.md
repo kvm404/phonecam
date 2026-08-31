@@ -1,11 +1,10 @@
 # PhoneCam Compatibility Matrix
 
-> **Status (v0.1):** This matrix is a template of the apps and platforms we want
-> to verify. Results are not yet independently verified beyond the single
-> reference setup (Arch Linux + a vivo Android device). Community reports for
-> other distros, phones, and apps are welcome.
+> **Status:** Template. Filling a published compatibility matrix is not
+> scheduled. Community reports for other distros, phones, and apps are welcome.
 
-This file records app and platform compatibility evidence for release decisions.
+This file records app and platform compatibility evidence. It is not a release
+gate.
 
 ## Required v0.1 Apps
 
