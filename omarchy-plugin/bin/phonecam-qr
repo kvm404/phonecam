@@ -10,9 +10,11 @@ if ! command -v qrencode >/dev/null 2>&1; then
 fi
 
 if [[ $# -ge 1 ]]; then
+  # Prefer stdin: pairing JSON contains a one-shot token and must not appear
+  # in `ps`. Argv exists only for the node/manual smoke test.
   payload=$1
 else
-  payload=$(cat)
+  IFS= read -r payload
 fi
 
 [[ -n $payload ]] || { echo "phonecam-qr: empty payload" >&2; exit 1; }

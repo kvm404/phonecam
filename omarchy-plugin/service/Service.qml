@@ -59,6 +59,7 @@ Item {
   property bool _crash: false
   property var _pairingFull: null
   property string _lastQrJson: ""
+  property string _qrPayload: ""
   property bool _healthz: false
   property bool _adopted: false
   property double nowMs: Date.now()
@@ -310,7 +311,8 @@ Item {
     var json = Model.compactJson(payload)
     if (json === "" || json === _lastQrJson) return
     _lastQrJson = json
-    qrProcess.command = [qrHelper, json]
+    _qrPayload = json
+    qrProcess.command = [qrHelper]
     qrProcess.running = true
   }
 
@@ -536,11 +538,16 @@ Item {
     id: qrProcess
     command: []
     running: false
+    stdinEnabled: true
     stdout: StdioCollector {
       id: qrStdout
       waitForEnd: true
     }
     stderr: StdioCollector { waitForEnd: true }
+    onStarted: {
+      write(root._qrPayload + "\n")
+      root._qrPayload = ""
+    }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
         root.qrRows = []

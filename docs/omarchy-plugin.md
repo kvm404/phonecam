@@ -79,8 +79,9 @@ It does not enable on its own.
 
 QR content is compact JSON from GET `/pairing` (`v`, `name`, `laptop_id?`,
 `control`, `rtp`, `session`, `token`, `expires`, `transport`, `video`).
-`bin/phonecam-qr` pipes to `qrencode --type ASCII --margin 4 --level L` and
-collapses ASCII pairs to a square `0/1` matrix (same idea as
+`bin/phonecam-qr` reads compact JSON on stdin (one line; never put the token
+on argv from the service), pipes to `qrencode --type ASCII --margin 4
+--level L`, and collapses ASCII pairs to a square `0/1` matrix (same idea as
 `omarchy-network-qr`). After `expires`, the UI offers Restart (stop then
 start, new token), not a fake Refresh.
 
