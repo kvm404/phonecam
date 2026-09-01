@@ -184,6 +184,13 @@ test("previewHelperArgv pins /dev/video10 and never video0", function() {
   assert.strictEqual(Model.v4l2Device("/dev/../video10"), "")
 })
 
+test("isPhoneCamDevice never treats the laptop webcam as PhoneCam", function() {
+  assert.strictEqual(Model.isPhoneCamDevice({ id: "/dev/video0", description: "Integrated Camera" }, "/dev/video10", "PhoneCam"), false)
+  assert.strictEqual(Model.isPhoneCamDevice({ id: "/dev/video10", description: "PhoneCam" }, "/dev/video10", "PhoneCam"), true)
+  assert.strictEqual(Model.isPhoneCamDevice({ id: "v4l2:/dev/video10", description: "Dummy" }, "/dev/video10", "PhoneCam"), true)
+  assert.strictEqual(Model.isPhoneCamDevice(null, "/dev/video10", "PhoneCam"), false)
+})
+
 test("pickCameraDevice prefers PhoneCam label then video_nr", function() {
   const inputs = [
     { id: "/dev/video0", description: "HP TrueVision" },

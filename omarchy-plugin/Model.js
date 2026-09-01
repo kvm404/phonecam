@@ -267,24 +267,22 @@ function previewHelperArgv(helper, device, outdir) {
   return ["setpriv", "--pdeathsig", "TERM", bin, dev, dir]
 }
 
+function isPhoneCamDevice(dev, preferredDevice, label) {
+  if (!dev) return false
+  var id = String(dev.id || "").toLowerCase()
+  var desc = String(dev.description || "").toLowerCase()
+  var name = String(label || "").toLowerCase()
+  if (name !== "" && desc.indexOf(name) !== -1) return true
+  var want = String(preferredDevice || "").replace(/^\/dev\//, "").toLowerCase()
+  if (want !== "" && (id.indexOf(want) !== -1 || desc.indexOf(want) !== -1)) return true
+  return false
+}
+
 function pickCameraDevice(inputs, preferredDevice, label) {
   if (!inputs || inputs.length === undefined) return null
-  var want = String(preferredDevice || "").replace(/^\/dev\//, "")
-  var name = String(label || "PhoneCam")
   var i
   for (i = 0; i < inputs.length; i++) {
-    var d = inputs[i]
-    if (!d) continue
-    var desc = String(d.description || "")
-    if (desc.indexOf(name) !== -1) return d
-  }
-  if (want === "") return null
-  for (i = 0; i < inputs.length; i++) {
-    var cam = inputs[i]
-    if (!cam) continue
-    var id = String(cam.id || "")
-    var title = String(cam.description || "")
-    if (id.indexOf(want) !== -1 || title.indexOf(want) !== -1) return cam
+    if (isPhoneCamDevice(inputs[i], preferredDevice, label)) return inputs[i]
   }
   return null
 }
@@ -318,6 +316,7 @@ if (typeof module !== "undefined") {
     previewDir: previewDir,
     previewFramePath: previewFramePath,
     previewHelperArgv: previewHelperArgv,
+    isPhoneCamDevice: isPhoneCamDevice,
     pickCameraDevice: pickCameraDevice
   }
 }

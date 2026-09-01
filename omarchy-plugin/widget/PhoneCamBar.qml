@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -48,7 +49,9 @@ Panel {
   }
   readonly property bool showQr: phase === "waiting" && svc && svc.qrSize > 0 && !svc.pairingExpired
   readonly property bool previewWanted: opened && (phase === "live" || phase === "silent")
-  property bool previewFront: true
+  readonly property string sessionDevice: svc && svc.sessionRecord && svc.sessionRecord.device
+    ? String(svc.sessionRecord.device)
+    : "/dev/video10"
 
   function pushSettings() {
     if (svc && "settings" in svc) svc.settings = settings
@@ -60,22 +63,32 @@ Panel {
     else svc.start()
   }
 
-  function syncPreview() {
-    if (svc && "previewEnabled" in svc) svc.previewEnabled = root.previewWanted
+  function selectedPhoneCam() {
+    var inputs = mediaDevices.videoInputs
+    var list = []
+    if (!inputs) return null
+    for (var i = 0; i < inputs.length; i++) list.push(inputs[i])
+    return Model.pickCameraDevice(list, root.sessionDevice, "PhoneCam")
+  }
+
+  function pinPreviewCamera() {
+    previewCamera.active = false
+    var d = selectedPhoneCam()
+    if (!d) return
+    previewCamera.cameraDevice = d
+    if (root.previewWanted && Model.isPhoneCamDevice(previewCamera.cameraDevice, root.sessionDevice, "PhoneCam"))
+      previewCamera.active = true
   }
 
   onSettingsChanged: pushSettings()
-  onSvcChanged: {
-    pushSettings()
-    syncPreview()
-  }
+  onSvcChanged: pushSettings()
   Component.onCompleted: {
     pushSettings()
-    syncPreview()
+    pinPreviewCamera()
   }
 
   onOpenedChanged: {
-    syncPreview()
+    pinPreviewCamera()
     if (opened) {
       pushSettings()
       if (svc) {
@@ -86,10 +99,26 @@ Panel {
     }
   }
 
-  onPhaseChanged: syncPreview()
+  onPhaseChanged: pinPreviewCamera()
+  onSessionDeviceChanged: pinPreviewCamera()
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  MediaDevices {
+    id: mediaDevices
+    onVideoInputsChanged: root.pinPreviewCamera()
+  }
+
+  CaptureSession {
+    camera: previewCamera
+    videoOutput: previewOut
+  }
+
+  Camera {
+    id: previewCamera
+    active: false
+  }
 
   IpcHandler {
     target: root.ipcTarget
@@ -312,52 +341,28 @@ Panel {
               color: "#111111"
               clip: true
 
-              Image {
-                id: previewA
+              VideoOutput {
+                id: previewOut
                 anchors.fill: parent
-                fillMode: Image.PreserveAspectFit
-                asynchronous: true
-                cache: false
-                visible: root.previewFront && status === Image.Ready
-                onStatusChanged: if (status === Image.Ready) root.previewFront = true
-              }
-
-              Image {
-                id: previewB
-                anchors.fill: parent
-                fillMode: Image.PreserveAspectFit
-                asynchronous: true
-                cache: false
-                visible: !root.previewFront && status === Image.Ready
-                onStatusChanged: if (status === Image.Ready) root.previewFront = false
+                fillMode: VideoOutput.PreserveAspectFit
+                visible: previewCamera.active && Model.isPhoneCamDevice(previewCamera.cameraDevice, root.sessionDevice, "PhoneCam")
               }
 
               Text {
-                visible: previewA.status !== Image.Ready && previewB.status !== Image.Ready
+                visible: !previewOut.visible
                 anchors.centerIn: parent
                 width: parent.width - Style.space(16)
-                text: root.previewWanted ? "Waiting for PhoneCam frames" : ""
+                text: {
+                  if (!root.previewWanted) return ""
+                  if (previewCamera.error !== Camera.NoError) return previewCamera.errorString
+                  if (!root.selectedPhoneCam()) return "PhoneCam is not in the camera list yet"
+                  return "Waiting for PhoneCam frames"
+                }
                 color: "#bbbbbb"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
                 horizontalAlignment: Text.AlignHCenter
-              }
-
-              Connections {
-                target: root.svc
-                enabled: root.previewWanted && !!root.svc
-                function onPreviewGenChanged() {
-                  if (!root.svc || !root.svc.runtimeDir) return
-                  var url = "file://" + Model.previewFramePath(root.svc.runtimeDir, root.svc.previewSlot)
-                  if (root.previewFront) {
-                    previewB.source = ""
-                    previewB.source = url
-                  } else {
-                    previewA.source = ""
-                    previewA.source = url
-                  }
-                }
               }
             }
 
