@@ -31,8 +31,8 @@ function parseDoctor(text) {
 
 var HOLDER_APP_LABELS = [
   ["discord", "Discord"],
-  ["chrome", "Chrome"],
   ["chromium", "Chromium"],
+  ["chrome", "Chrome"],
   ["firefox", "Firefox"],
   ["zoom", "Zoom"],
   ["obs", "OBS"],
@@ -49,6 +49,9 @@ function classifyHolder(name) {
   if (raw === "") return null
   var lower = raw.toLowerCase()
   if (lower.indexOf("gst-launch") === 0 || lower === "gst-launch-1.0") {
+    return { raw: raw, kind: "receiver", label: "PhoneCam receiver" }
+  }
+  if (lower.indexOf("pipewire") !== -1 || lower.indexOf("wireplumber") !== -1) {
     return { raw: raw, kind: "receiver", label: "PhoneCam receiver" }
   }
   if (lower.indexOf("quickshell") !== -1 || lower.indexOf("omarchy-shell") !== -1) {
@@ -69,6 +72,9 @@ function parseHolders(checks) {
     if (!check || check.name !== "Virtual camera holders") continue
     if (check.status !== "WARN") return []
     var msg = String(check.message || "")
+    if (msg.indexOf("could not inspect") >= 0) {
+      return [{ raw: "", kind: "unknown", label: "" }]
+    }
     var marker = "open by "
     var at = msg.indexOf(marker)
     if (at < 0) return []
@@ -93,6 +99,7 @@ function holdersHeadline(holders) {
   for (var i = 0; i < holders.length; i++) {
     var h = holders[i]
     if (!h) continue
+    if (h.kind === "unknown") return "Could not see who holds PhoneCam"
     if (h.kind === "receiver") {
       receiver = true
       continue
@@ -319,53 +326,6 @@ function parseSessionRecord(raw) {
   }
 }
 
-function v4l2Device(path) {
-  var value = String(path || "")
-  if (!/^\/dev\/video[0-9]+$/.test(value)) return ""
-  return value
-}
-
-function previewDir(runtimeDir) {
-  var dir = String(runtimeDir || "").replace(/\/+$/, "")
-  if (dir === "" || dir.indexOf("..") !== -1) return ""
-  return dir + "/phonecam"
-}
-
-function previewFramePath(runtimeDir, slot) {
-  var dir = previewDir(runtimeDir)
-  if (dir === "") return ""
-  return dir + "/frame-" + (slot ? 1 : 0) + ".jpg"
-}
-
-function previewHelperArgv(helper, device, outdir) {
-  var bin = String(helper || "")
-  var dev = v4l2Device(device)
-  var dir = String(outdir || "")
-  if (bin === "" || bin.indexOf("..") !== -1 || bin.charAt(0) !== "/") return []
-  if (dev === "" || dir === "" || dir.indexOf("..") !== -1 || dir.charAt(0) !== "/") return []
-  return ["setpriv", "--pdeathsig", "TERM", bin, dev, dir]
-}
-
-function isPhoneCamDevice(dev, preferredDevice, label) {
-  if (!dev) return false
-  var id = String(dev.id || "").toLowerCase()
-  var desc = String(dev.description || "").toLowerCase()
-  var name = String(label || "").toLowerCase()
-  if (name !== "" && desc.indexOf(name) !== -1) return true
-  var want = String(preferredDevice || "").replace(/^\/dev\//, "").toLowerCase()
-  if (want !== "" && (id.indexOf(want) !== -1 || desc.indexOf(want) !== -1)) return true
-  return false
-}
-
-function pickCameraDevice(inputs, preferredDevice, label) {
-  if (!inputs || inputs.length === undefined) return null
-  var i
-  for (i = 0; i < inputs.length; i++) {
-    if (isPhoneCamDevice(inputs[i], preferredDevice, label)) return inputs[i]
-  }
-  return null
-}
-
 if (typeof module !== "undefined") {
   module.exports = {
     BLOCKING_DOCTOR_NAMES: BLOCKING_DOCTOR_NAMES,
@@ -393,12 +353,6 @@ if (typeof module !== "undefined") {
     videoLabel: videoLabel,
     phaseLabel: phaseLabel,
     parseTrust: parseTrust,
-    parseSessionRecord: parseSessionRecord,
-    v4l2Device: v4l2Device,
-    previewDir: previewDir,
-    previewFramePath: previewFramePath,
-    previewHelperArgv: previewHelperArgv,
-    isPhoneCamDevice: isPhoneCamDevice,
-    pickCameraDevice: pickCameraDevice
+    parseSessionRecord: parseSessionRecord
   }
 }

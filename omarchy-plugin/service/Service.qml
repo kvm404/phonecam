@@ -321,6 +321,9 @@ Item {
     var checks = Model.parseDoctor(_doctorOutput || doctorStdout.text || "")
     doctorChecks = checks
     doctorBlocking = Model.doctorBlocking(checks)
+    if (exitCode !== 0 && checks.length === 0) {
+      lastError = Model.concise(_doctorError || "phonecam doctor failed")
+    }
     if (_startAfterDoctor) {
       _startAfterDoctor = false
       if (doctorBlocking) {

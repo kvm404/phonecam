@@ -26,7 +26,7 @@ Panel {
   readonly property color barIconColor: {
     if (!svc) return dim
     if (svc.doctorBlocking || phase === "error") return urgent
-    if (phase === "live") return barForeground
+    if (phase === "live") return bar ? bar.barForeground : foreground
     if (phase === "waiting") return foreground
     return dim
   }

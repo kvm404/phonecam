@@ -180,48 +180,12 @@ test("holdersHeadline names Discord and ignores the gst receiver", function() {
     { kind: "receiver", label: "PhoneCam receiver" }
   ]), "Ready — pick PhoneCam in an app")
   assert.strictEqual(Model.holdersHeadline([]), "No app is using PhoneCam")
-})
-
-test("previewHelperArgv pins /dev/video10 and never video0", function() {
-  const argv = Model.previewHelperArgv(
-    "/opt/plugin/bin/phonecam-preview",
-    "/dev/video10",
-    "/run/user/1000/phonecam"
-  )
-  assert.deepStrictEqual(argv, [
-    "setpriv", "--pdeathsig", "TERM",
-    "/opt/plugin/bin/phonecam-preview",
-    "/dev/video10",
-    "/run/user/1000/phonecam"
-  ])
-  assert.ok(argv.join(" ").indexOf("video0") === -1)
-  assert.deepStrictEqual(Model.previewHelperArgv("/opt/plugin/bin/phonecam-preview", "/dev/video10", "../tmp"), [])
-  assert.strictEqual(Model.previewFramePath("/run/user/1000", 1), "/run/user/1000/phonecam/frame-1.jpg")
-  assert.strictEqual(Model.v4l2Device("/dev/video10"), "/dev/video10")
-  assert.strictEqual(Model.v4l2Device("/dev/../video10"), "")
-})
-
-test("isPhoneCamDevice never treats the laptop webcam as PhoneCam", function() {
-  assert.strictEqual(Model.isPhoneCamDevice({ id: "/dev/video0", description: "Integrated Camera" }, "/dev/video10", "PhoneCam"), false)
-  assert.strictEqual(Model.isPhoneCamDevice({ id: "/dev/video10", description: "PhoneCam" }, "/dev/video10", "PhoneCam"), true)
-  assert.strictEqual(Model.isPhoneCamDevice({ id: "v4l2:/dev/video10", description: "Dummy" }, "/dev/video10", "PhoneCam"), true)
-  assert.strictEqual(Model.isPhoneCamDevice(null, "/dev/video10", "PhoneCam"), false)
-})
-
-test("pickCameraDevice prefers PhoneCam label then video_nr", function() {
-  const inputs = [
-    { id: "/dev/video0", description: "HP TrueVision" },
-    { id: "/dev/video10", description: "PhoneCam" }
-  ]
-  const hit = Model.pickCameraDevice(inputs, "/dev/video10", "PhoneCam")
-  assert.strictEqual(hit.description, "PhoneCam")
-  const byPath = Model.pickCameraDevice(
-    [{ id: "v4l2:/dev/video10", description: "Dummy" }],
-    "/dev/video10",
-    "PhoneCam"
-  )
-  assert.strictEqual(byPath.id, "v4l2:/dev/video10")
-  assert.strictEqual(Model.pickCameraDevice(inputs, "", "Nope"), null)
+  assert.strictEqual(Model.classifyHolder("chromium").label, "Chromium")
+  assert.strictEqual(Model.classifyHolder("chrome").label, "Chrome")
+  assert.strictEqual(Model.classifyHolder("pipewire").kind, "receiver")
+  assert.strictEqual(Model.holdersHeadline([
+    { kind: "unknown", label: "" }
+  ]), "Could not see who holds PhoneCam")
 })
 
 console.log("all tests passed")
