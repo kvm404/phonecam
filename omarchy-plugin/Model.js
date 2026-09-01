@@ -240,6 +240,32 @@ function parseSessionRecord(raw) {
   }
 }
 
+function v4l2Device(path) {
+  var value = String(path || "")
+  if (!/^\/dev\/video[0-9]+$/.test(value)) return ""
+  return value
+}
+
+function previewJpegPath(runtimeDir) {
+  var dir = String(runtimeDir || "").replace(/\/+$/, "")
+  if (dir === "" || dir.indexOf("..") !== -1) return ""
+  return dir + "/phonecam/preview.jpg"
+}
+
+function previewGstArgv(device, jpegPath) {
+  var dev = v4l2Device(device)
+  var out = String(jpegPath || "")
+  if (dev === "" || out === "" || out.indexOf("..") !== -1) return []
+  if (out.charAt(0) !== "/") return []
+  return [
+    "gst-launch-1.0", "-q",
+    "v4l2src", "device=" + dev, "num-buffers=1",
+    "!", "videoconvert",
+    "!", "jpegenc",
+    "!", "filesink", "location=" + out
+  ]
+}
+
 function pickCameraDevice(inputs, preferredDevice, label) {
   if (!inputs || inputs.length === undefined) return null
   var want = String(preferredDevice || "").replace(/^\/dev\//, "")
@@ -287,6 +313,9 @@ if (typeof module !== "undefined") {
     phaseLabel: phaseLabel,
     parseTrust: parseTrust,
     parseSessionRecord: parseSessionRecord,
+    v4l2Device: v4l2Device,
+    previewJpegPath: previewJpegPath,
+    previewGstArgv: previewGstArgv,
     pickCameraDevice: pickCameraDevice
   }
 }

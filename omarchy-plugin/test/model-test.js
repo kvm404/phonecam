@@ -165,6 +165,16 @@ test("parseSessionRecord keeps device path", function() {
   assert.strictEqual(rec.device, "/dev/video10")
 })
 
+test("previewGstArgv pins the given v4l2 node and never video0", function() {
+  const argv = Model.previewGstArgv("/dev/video10", "/run/user/1000/phonecam/preview.jpg")
+  assert.ok(argv.indexOf("device=/dev/video10") !== -1)
+  assert.ok(argv.join(" ").indexOf("video0") === -1)
+  assert.deepStrictEqual(Model.previewGstArgv("/dev/video10", "../etc/passwd"), [])
+  assert.deepStrictEqual(Model.previewGstArgv("/etc/passwd", "/run/user/1000/phonecam/preview.jpg"), [])
+  assert.strictEqual(Model.v4l2Device("/dev/video10"), "/dev/video10")
+  assert.strictEqual(Model.v4l2Device("/dev/../video10"), "")
+})
+
 test("pickCameraDevice prefers PhoneCam label then video_nr", function() {
   const inputs = [
     { id: "/dev/video0", description: "HP TrueVision" },

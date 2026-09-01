@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -49,9 +48,6 @@ Panel {
   }
   readonly property bool showQr: phase === "waiting" && svc && svc.qrSize > 0 && !svc.pairingExpired
   readonly property bool previewWanted: opened && (phase === "live" || phase === "silent")
-  readonly property string sessionDevice: svc && svc.sessionRecord && svc.sessionRecord.device
-    ? String(svc.sessionRecord.device)
-    : "/dev/video10"
 
   function pushSettings() {
     if (svc && "settings" in svc) svc.settings = settings
@@ -63,47 +59,36 @@ Panel {
     else svc.start()
   }
 
-  function selectedCamera() {
-    var inputs = mediaDevices.videoInputs
-    var list = []
-    if (!inputs) return null
-    for (var i = 0; i < inputs.length; i++) list.push(inputs[i])
-    return Model.pickCameraDevice(list, root.sessionDevice, "PhoneCam")
+  function syncPreview() {
+    if (svc && "previewEnabled" in svc) svc.previewEnabled = root.previewWanted
   }
 
   onSettingsChanged: pushSettings()
-  onSvcChanged: pushSettings()
-  Component.onCompleted: pushSettings()
-
-  onOpenedChanged: if (opened) {
+  onSvcChanged: {
     pushSettings()
-    if (svc) {
-      svc.refreshDoctor()
-      svc.refreshTrust()
-    }
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    syncPreview()
   }
+  Component.onCompleted: {
+    pushSettings()
+    syncPreview()
+  }
+
+  onOpenedChanged: {
+    syncPreview()
+    if (opened) {
+      pushSettings()
+      if (svc) {
+        svc.refreshDoctor()
+        svc.refreshTrust()
+      }
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    }
+  }
+
+  onPhaseChanged: syncPreview()
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
-
-  MediaDevices {
-    id: mediaDevices
-  }
-
-  CaptureSession {
-    camera: previewCamera
-    videoOutput: previewOut
-  }
-
-  Camera {
-    id: previewCamera
-    cameraDevice: {
-      var inputs = mediaDevices.videoInputs
-      return root.selectedCamera()
-    }
-    active: root.previewWanted && !!cameraDevice
-  }
 
   IpcHandler {
     target: root.ipcTarget
@@ -326,20 +311,24 @@ Panel {
               color: "#111111"
               clip: true
 
-              VideoOutput {
-                id: previewOut
+              Image {
+                id: previewImage
                 anchors.fill: parent
-                fillMode: VideoOutput.PreserveAspectFit
-                visible: previewCamera.active && previewCamera.error === Camera.NoError
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+                cache: false
+                source: {
+                  if (!root.previewWanted || !root.svc || !root.svc.previewPath) return ""
+                  return "file://" + root.svc.previewPath + "?v=" + root.svc.previewGen
+                }
+                visible: status === Image.Ready
               }
 
               Text {
-                visible: !previewOut.visible
+                visible: !previewImage.visible
                 anchors.centerIn: parent
                 width: parent.width - Style.space(16)
-                text: previewCamera.error !== Camera.NoError
-                  ? previewCamera.errorString
-                  : (root.previewWanted ? "Waiting for PhoneCam frames" : "")
+                text: root.previewWanted ? "Waiting for PhoneCam frames" : ""
                 color: "#bbbbbb"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption

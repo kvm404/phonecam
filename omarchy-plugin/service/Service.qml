@@ -13,10 +13,12 @@ Item {
   readonly property string sourceDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
   readonly property string qrHelper: sourceDir === "" ? "" : sourceDir + "/bin/phonecam-qr"
   readonly property string homeDir: Quickshell.env("HOME")
-  readonly property string sessionPath: {
-    var dir = Quickshell.env("XDG_RUNTIME_DIR")
-    return dir ? dir + "/phonecam/session.json" : ""
-  }
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR")
+  readonly property string sessionPath: runtimeDir ? runtimeDir + "/phonecam/session.json" : ""
+  readonly property string previewPath: Model.previewJpegPath(runtimeDir)
+  readonly property string previewDevice: Model.v4l2Device(sessionRecord && sessionRecord.device) || "/dev/video10"
+  property bool previewEnabled: false
+  property int previewGen: 0
   readonly property int controlPort: Model.normalizePort(setting("controlPort", 47470), 47470)
   readonly property int rtpPort: Model.normalizePort(setting("rtpPort", 47471), 47471)
   readonly property int activeControlPort: sessionRecord && sessionRecord.control_port
@@ -387,12 +389,28 @@ Item {
 
   onSettingsChanged: beginDiscover()
 
+  function previewActive() {
+    return previewEnabled && (phase === "live" || phase === "silent") && previewPath !== ""
+  }
+
+  function launchPreviewFrame() {
+    if (previewProcess.running || !previewActive()) return
+    var argv = Model.previewGstArgv(previewDevice, previewPath)
+    if (argv.length === 0) return
+    previewProcess.command = argv
+    previewProcess.running = true
+  }
+
+  onPreviewEnabledChanged: if (!previewActive() && previewProcess.running) previewProcess.running = false
+
   Component.onDestruction: {
     _intentionalStop = true
     pollTimer.stop()
+    previewTimer.stop()
     if (probeProcess.running) probeProcess.running = false
     if (qrProcess.running) qrProcess.running = false
     if (doctorProcess.running) doctorProcess.running = false
+    if (previewProcess.running) previewProcess.running = false
     // Leave phonecam start running; pdeathsig TERM handles shell exit.
   }
 
@@ -415,6 +433,26 @@ Item {
         root.qrRows = []
         root.qrSize = 0
       }
+    }
+  }
+
+  Timer {
+    id: previewTimer
+    interval: 150
+    repeat: true
+    running: root.previewEnabled && (root.phase === "live" || root.phase === "silent") && root.previewPath !== ""
+    triggeredOnStart: true
+    onTriggered: root.launchPreviewFrame()
+  }
+
+  Process {
+    id: previewProcess
+    command: []
+    running: false
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.previewGen++
     }
   }
 

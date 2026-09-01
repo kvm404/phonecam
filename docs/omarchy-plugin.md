@@ -74,10 +74,11 @@ It does not enable on its own.
   `gst-launch`.
 - Empty `binaryPath`: `PATH` `phonecam`, then `$HOME/.local/bin/phonecam`,
   then `$(go env GOPATH)/bin/phonecam`.
-- Live preview: Qt Multimedia `Camera` on the PhoneCam v4l2 node, **only
-  while the panel is open** and the session is live/silent. Loopback allows
-  multiple readers; closing the panel drops the extra opener. Do not hold
-  `/dev/video10` from a closed widget.
+- Live preview: `gst-launch` snapshots from the session v4l2 node
+  (`/dev/video10` unless `session.json` says otherwise), **only while the
+  panel is open**. Do not use Qt `Camera` — it falls back to the laptop
+  webcam when PhoneCam is missing from `MediaDevices`. Closing the panel
+  stops the extra opener.
 
 ## QR
 
