@@ -16,6 +16,7 @@ omarchy-plugin/
   service/Service.qml      # start/stop, HTTP client, QR helper
   widget/PhoneCamBar.qml   # bar icon + panel
   bin/phonecam-qr          # stdin JSON → 0/1 QR matrix
+  bin/phonecam-preview     # live JPEG ping-pong from /dev/video10
   test/model-test.js
   install.sh
 ```
@@ -74,11 +75,12 @@ It does not enable on its own.
   `gst-launch`.
 - Empty `binaryPath`: `PATH` `phonecam`, then `$HOME/.local/bin/phonecam`,
   then `$(go env GOPATH)/bin/phonecam`.
-- Live preview: `gst-launch` snapshots from the session v4l2 node
-  (`/dev/video10` unless `session.json` says otherwise), **only while the
-  panel is open**. Do not use Qt `Camera` — it falls back to the laptop
-  webcam when PhoneCam is missing from `MediaDevices`. Closing the panel
-  stops the extra opener.
+- Live preview: `bin/phonecam-preview` keeps `gst-launch` on the session
+  v4l2 node (`/dev/video10` unless `session.json` says otherwise) and
+  ping-pongs `frame-0.jpg` / `frame-1.jpg` so the panel shows motion, not
+  one still. Runs **only while the panel is open**. Do not use Qt `Camera`
+  (it falls back to the laptop webcam). Closing the panel stops the extra
+  opener.
 
 ## QR
 

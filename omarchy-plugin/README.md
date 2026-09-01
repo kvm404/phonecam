@@ -15,8 +15,8 @@ omarchy plugin enable io.github.kvm404.phonecam
 `install.sh` copies into `~/.config/omarchy/plugins/io.github.kvm404.phonecam`
 and prints the enable command. It does not enable the plugin itself.
 
-While the stream is live, the open panel snapshots `/dev/video10` (PhoneCam),
-not the laptop webcam. Closing the panel stops those snapshots.
+While the stream is live, the open panel plays `/dev/video10` (PhoneCam) at
+about 15 fps. Closing the panel stops the extra reader.
 
 Needs `phonecam` on PATH (or `~/.local/bin/phonecam`), `curl`, `setpriv`,
 `qrencode`, and Omarchy 4+ with Quickshell. Press Start in the panel; the

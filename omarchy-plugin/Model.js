@@ -246,24 +246,25 @@ function v4l2Device(path) {
   return value
 }
 
-function previewJpegPath(runtimeDir) {
+function previewDir(runtimeDir) {
   var dir = String(runtimeDir || "").replace(/\/+$/, "")
   if (dir === "" || dir.indexOf("..") !== -1) return ""
-  return dir + "/phonecam/preview.jpg"
+  return dir + "/phonecam"
 }
 
-function previewGstArgv(device, jpegPath) {
+function previewFramePath(runtimeDir, slot) {
+  var dir = previewDir(runtimeDir)
+  if (dir === "") return ""
+  return dir + "/frame-" + (slot ? 1 : 0) + ".jpg"
+}
+
+function previewHelperArgv(helper, device, outdir) {
+  var bin = String(helper || "")
   var dev = v4l2Device(device)
-  var out = String(jpegPath || "")
-  if (dev === "" || out === "" || out.indexOf("..") !== -1) return []
-  if (out.charAt(0) !== "/") return []
-  return [
-    "gst-launch-1.0", "-q",
-    "v4l2src", "device=" + dev, "num-buffers=1",
-    "!", "videoconvert",
-    "!", "jpegenc",
-    "!", "filesink", "location=" + out
-  ]
+  var dir = String(outdir || "")
+  if (bin === "" || bin.indexOf("..") !== -1 || bin.charAt(0) !== "/") return []
+  if (dev === "" || dir === "" || dir.indexOf("..") !== -1 || dir.charAt(0) !== "/") return []
+  return ["setpriv", "--pdeathsig", "TERM", bin, dev, dir]
 }
 
 function pickCameraDevice(inputs, preferredDevice, label) {
@@ -314,8 +315,9 @@ if (typeof module !== "undefined") {
     parseTrust: parseTrust,
     parseSessionRecord: parseSessionRecord,
     v4l2Device: v4l2Device,
-    previewJpegPath: previewJpegPath,
-    previewGstArgv: previewGstArgv,
+    previewDir: previewDir,
+    previewFramePath: previewFramePath,
+    previewHelperArgv: previewHelperArgv,
     pickCameraDevice: pickCameraDevice
   }
 }

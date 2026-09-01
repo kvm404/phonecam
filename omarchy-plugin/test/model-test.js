@@ -165,12 +165,21 @@ test("parseSessionRecord keeps device path", function() {
   assert.strictEqual(rec.device, "/dev/video10")
 })
 
-test("previewGstArgv pins the given v4l2 node and never video0", function() {
-  const argv = Model.previewGstArgv("/dev/video10", "/run/user/1000/phonecam/preview.jpg")
-  assert.ok(argv.indexOf("device=/dev/video10") !== -1)
+test("previewHelperArgv pins /dev/video10 and never video0", function() {
+  const argv = Model.previewHelperArgv(
+    "/opt/plugin/bin/phonecam-preview",
+    "/dev/video10",
+    "/run/user/1000/phonecam"
+  )
+  assert.deepStrictEqual(argv, [
+    "setpriv", "--pdeathsig", "TERM",
+    "/opt/plugin/bin/phonecam-preview",
+    "/dev/video10",
+    "/run/user/1000/phonecam"
+  ])
   assert.ok(argv.join(" ").indexOf("video0") === -1)
-  assert.deepStrictEqual(Model.previewGstArgv("/dev/video10", "../etc/passwd"), [])
-  assert.deepStrictEqual(Model.previewGstArgv("/etc/passwd", "/run/user/1000/phonecam/preview.jpg"), [])
+  assert.deepStrictEqual(Model.previewHelperArgv("/opt/plugin/bin/phonecam-preview", "/dev/video10", "../tmp"), [])
+  assert.strictEqual(Model.previewFramePath("/run/user/1000", 1), "/run/user/1000/phonecam/frame-1.jpg")
   assert.strictEqual(Model.v4l2Device("/dev/video10"), "/dev/video10")
   assert.strictEqual(Model.v4l2Device("/dev/../video10"), "")
 })

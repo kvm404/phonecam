@@ -30,7 +30,7 @@ else
   done
 fi
 
-chmod +x "$dest/install.sh" "$dest/bin/phonecam-qr" 2>/dev/null || true
+chmod +x "$dest/install.sh" "$dest/bin/phonecam-qr" "$dest/bin/phonecam-preview" 2>/dev/null || true
 
 echo "Installed $dest"
 if command -v omarchy-shell >/dev/null 2>&1; then

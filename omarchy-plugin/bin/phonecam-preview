@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Live preview: keep a GStreamer reader on the given v4l2 node and ping-pong
+# complete JPEGs so QML can swap file:// URLs. Prints 0 or 1 each frame.
+set -euo pipefail
+
+if [[ -z "${PHONECAM_PREVIEW_UNBUFFERED:-}" ]] && command -v stdbuf >/dev/null 2>&1; then
+  export PHONECAM_PREVIEW_UNBUFFERED=1
+  exec stdbuf -oL "$0" "$@"
+fi
+
+device=${1:-}
+outdir=${2:-}
+
+[[ "$device" =~ ^/dev/video[0-9]+$ ]] || {
+  echo "phonecam-preview: device must be /dev/videoN" >&2
+  exit 1
+}
+[[ "$outdir" == /* && "$outdir" != *..* ]] || {
+  echo "phonecam-preview: invalid output dir" >&2
+  exit 1
+}
+
+[[ -c "$device" ]] || {
+  echo "phonecam-preview: $device is not a v4l2 node" >&2
+  exit 1
+}
+
+mkdir -p "$outdir"
+live="$outdir/live.jpg"
+
+gst-launch-1.0 -q \
+  v4l2src "device=$device" \
+  ! videoconvert \
+  ! videorate drop-only=true skip-to-first=true \
+  ! "video/x-raw,framerate=15/1" \
+  ! jpegenc quality=70 \
+  ! multifilesink "location=$live" next-file=buffer max-files=1 &
+gstpid=$!
+
+cleanup() {
+  kill "$gstpid" 2>/dev/null || true
+  wait "$gstpid" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+n=0
+while kill -0 "$gstpid" 2>/dev/null; do
+  if [[ -s "$live" ]]; then
+    slot=$((n & 1))
+    cp -f "$live" "$outdir/frame-$slot.jpg"
+    printf '%s\n' "$slot"
+    n=$((n + 1))
+  fi
+  sleep 0.06
+done
+
+wait "$gstpid" || true
+exit 1

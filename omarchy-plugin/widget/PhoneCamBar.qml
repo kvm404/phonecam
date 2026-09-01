@@ -48,6 +48,7 @@ Panel {
   }
   readonly property bool showQr: phase === "waiting" && svc && svc.qrSize > 0 && !svc.pairingExpired
   readonly property bool previewWanted: opened && (phase === "live" || phase === "silent")
+  property bool previewFront: true
 
   function pushSettings() {
     if (svc && "settings" in svc) svc.settings = settings
@@ -312,20 +313,27 @@ Panel {
               clip: true
 
               Image {
-                id: previewImage
+                id: previewA
                 anchors.fill: parent
                 fillMode: Image.PreserveAspectFit
                 asynchronous: true
                 cache: false
-                source: {
-                  if (!root.previewWanted || !root.svc || !root.svc.previewPath) return ""
-                  return "file://" + root.svc.previewPath + "?v=" + root.svc.previewGen
-                }
-                visible: status === Image.Ready
+                visible: root.previewFront && status === Image.Ready
+                onStatusChanged: if (status === Image.Ready) root.previewFront = true
+              }
+
+              Image {
+                id: previewB
+                anchors.fill: parent
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+                cache: false
+                visible: !root.previewFront && status === Image.Ready
+                onStatusChanged: if (status === Image.Ready) root.previewFront = false
               }
 
               Text {
-                visible: !previewImage.visible
+                visible: previewA.status !== Image.Ready && previewB.status !== Image.Ready
                 anchors.centerIn: parent
                 width: parent.width - Style.space(16)
                 text: root.previewWanted ? "Waiting for PhoneCam frames" : ""
@@ -334,6 +342,22 @@ Panel {
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
                 horizontalAlignment: Text.AlignHCenter
+              }
+
+              Connections {
+                target: root.svc
+                enabled: root.previewWanted && !!root.svc
+                function onPreviewGenChanged() {
+                  if (!root.svc || !root.svc.runtimeDir) return
+                  var url = "file://" + Model.previewFramePath(root.svc.runtimeDir, root.svc.previewSlot)
+                  if (root.previewFront) {
+                    previewB.source = ""
+                    previewB.source = url
+                  } else {
+                    previewA.source = ""
+                    previewA.source = url
+                  }
+                }
               }
             }
 

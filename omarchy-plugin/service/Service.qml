@@ -15,9 +15,10 @@ Item {
   readonly property string homeDir: Quickshell.env("HOME")
   readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR")
   readonly property string sessionPath: runtimeDir ? runtimeDir + "/phonecam/session.json" : ""
-  readonly property string previewPath: Model.previewJpegPath(runtimeDir)
+  readonly property string previewDir: Model.previewDir(runtimeDir)
   readonly property string previewDevice: Model.v4l2Device(sessionRecord && sessionRecord.device) || "/dev/video10"
   property bool previewEnabled: false
+  property int previewSlot: 0
   property int previewGen: 0
   readonly property int controlPort: Model.normalizePort(setting("controlPort", 47470), 47470)
   readonly property int rtpPort: Model.normalizePort(setting("rtpPort", 47471), 47471)
@@ -390,23 +391,28 @@ Item {
   onSettingsChanged: beginDiscover()
 
   function previewActive() {
-    return previewEnabled && (phase === "live" || phase === "silent") && previewPath !== ""
+    return previewEnabled && (phase === "live" || phase === "silent") && previewDir !== "" && sourceDir !== ""
   }
 
-  function launchPreviewFrame() {
-    if (previewProcess.running || !previewActive()) return
-    var argv = Model.previewGstArgv(previewDevice, previewPath)
+  function syncPreviewProcess() {
+    if (!previewActive()) {
+      if (previewProcess.running) previewProcess.running = false
+      return
+    }
+    if (previewProcess.running) return
+    var helper = sourceDir + "/bin/phonecam-preview"
+    var argv = Model.previewHelperArgv(helper, previewDevice, previewDir)
     if (argv.length === 0) return
     previewProcess.command = argv
     previewProcess.running = true
   }
 
-  onPreviewEnabledChanged: if (!previewActive() && previewProcess.running) previewProcess.running = false
+  onPreviewEnabledChanged: syncPreviewProcess()
+  onPhaseChanged: syncPreviewProcess()
 
   Component.onDestruction: {
     _intentionalStop = true
     pollTimer.stop()
-    previewTimer.stop()
     if (probeProcess.running) probeProcess.running = false
     if (qrProcess.running) qrProcess.running = false
     if (doctorProcess.running) doctorProcess.running = false
@@ -436,23 +442,22 @@ Item {
     }
   }
 
-  Timer {
-    id: previewTimer
-    interval: 150
-    repeat: true
-    running: root.previewEnabled && (root.phase === "live" || root.phase === "silent") && root.previewPath !== ""
-    triggeredOnStart: true
-    onTriggered: root.launchPreviewFrame()
-  }
-
   Process {
     id: previewProcess
     command: []
     running: false
-    stdout: StdioCollector { waitForEnd: true }
+    stdout: SplitParser {
+      onRead: function(line) {
+        var slot = parseInt(String(line || "").trim(), 10)
+        if (slot === 0 || slot === 1) {
+          root.previewSlot = slot
+          root.previewGen++
+        }
+      }
+    }
     stderr: StdioCollector { waitForEnd: true }
-    onExited: function(exitCode) {
-      if (exitCode === 0) root.previewGen++
+    onExited: {
+      if (root.previewActive()) Qt.callLater(function() { root.syncPreviewProcess() })
     }
   }
 
