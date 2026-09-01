@@ -65,30 +65,24 @@ Panel {
 
   function selectedPhoneCam() {
     var inputs = mediaDevices.videoInputs
-    var list = []
     if (!inputs) return null
-    for (var i = 0; i < inputs.length; i++) list.push(inputs[i])
-    return Model.pickCameraDevice(list, root.sessionDevice, "PhoneCam")
+    for (var i = 0; i < inputs.length; i++) {
+      if (Model.isPhoneCamDevice(inputs[i], root.sessionDevice, "PhoneCam"))
+        return inputs[i]
+    }
+    return null
   }
 
-  function pinPreviewCamera() {
-    previewCamera.active = false
-    var d = selectedPhoneCam()
-    if (!d) return
-    previewCamera.cameraDevice = d
-    if (root.previewWanted && Model.isPhoneCamDevice(previewCamera.cameraDevice, root.sessionDevice, "PhoneCam"))
-      previewCamera.active = true
+  readonly property var phoneCam: {
+    var _dep = mediaDevices.videoInputs
+    return selectedPhoneCam()
   }
 
   onSettingsChanged: pushSettings()
   onSvcChanged: pushSettings()
-  Component.onCompleted: {
-    pushSettings()
-    pinPreviewCamera()
-  }
+  Component.onCompleted: pushSettings()
 
   onOpenedChanged: {
-    pinPreviewCamera()
     if (opened) {
       pushSettings()
       if (svc) {
@@ -99,15 +93,11 @@ Panel {
     }
   }
 
-  onPhaseChanged: pinPreviewCamera()
-  onSessionDeviceChanged: pinPreviewCamera()
-
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   MediaDevices {
     id: mediaDevices
-    onVideoInputsChanged: root.pinPreviewCamera()
   }
 
   CaptureSession {
@@ -117,7 +107,8 @@ Panel {
 
   Camera {
     id: previewCamera
-    active: false
+    cameraDevice: root.phoneCam
+    active: root.previewWanted && root.phoneCam != null
   }
 
   IpcHandler {
@@ -345,7 +336,7 @@ Panel {
                 id: previewOut
                 anchors.fill: parent
                 fillMode: VideoOutput.PreserveAspectFit
-                visible: previewCamera.active && Model.isPhoneCamDevice(previewCamera.cameraDevice, root.sessionDevice, "PhoneCam")
+                visible: previewCamera.active
               }
 
               Text {
