@@ -4,6 +4,10 @@
 v1.0, or Later bucket. USB, audio, tray, systemd, torch, distro packages, and
 the other unscheduled items that used to live here are cancelled — not deferred.
 
+## Current
+
+Omarchy bar plugin (`omarchy-plugin/`, id `io.github.kvm404.phonecam`): start/stop, pairing QR, status, doctor, trust. Wraps the v0.2 CLI. Not USB, audio, tray, or systemd.
+
 ## v0.1: Local Wi-Fi MVP
 
 - Android app.

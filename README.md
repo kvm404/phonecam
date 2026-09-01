@@ -60,4 +60,4 @@ video goes straight from phone to laptop.
 ## Docs & License
 
 Design and product docs are in [`docs/`](docs/). Licensed under
-[MIT](LICENSE).
+[MIT](LICENSE). Omarchy bar plugin: [`omarchy-plugin/README.md`](omarchy-plugin/README.md).

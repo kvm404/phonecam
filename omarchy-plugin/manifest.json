@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.kvm404.phonecam",
+  "name": "PhoneCam",
+  "version": "0.1.0",
+  "author": "kvm404",
+  "license": "MIT",
+  "description": "Start and stop PhoneCam, show the pairing QR, and read loopback status from the Omarchy bar.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "service/Service.qml",
+    "barWidget": "widget/PhoneCamBar.qml"
+  },
+  "barWidget": {
+    "displayName": "PhoneCam",
+    "description": "Operate the PhoneCam CLI: pairing QR, live status, doctor, and trusted phones.",
+    "category": "Devices",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "binaryPath": "",
+      "controlPort": 47470,
+      "rtpPort": 47471
+    },
+    "schema": [
+      {
+        "key": "binaryPath",
+        "type": "string",
+        "label": "PhoneCam binary path",
+        "defaultValue": ""
+      },
+      {
+        "key": "controlPort",
+        "type": "integer",
+        "label": "Control port",
+        "min": 1024,
+        "max": 65535,
+        "defaultValue": 47470
+      },
+      {
+        "key": "rtpPort",
+        "type": "integer",
+        "label": "RTP port",
+        "min": 1024,
+        "max": 65535,
+        "defaultValue": 47471
+      }
+    ]
+  }
+}
