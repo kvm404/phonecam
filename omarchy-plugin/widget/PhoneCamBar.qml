@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -43,15 +42,12 @@ Panel {
     var checks = svc && svc.doctorChecks instanceof Array ? svc.doctorChecks : []
     for (var i = 0; i < checks.length; i++) {
       var check = checks[i]
-      if (check && (check.status === "FAIL" || check.status === "WARN")) list.push(check)
+      if (check && (check.status === "FAIL" || check.status === "WARN") && check.name !== "Virtual camera holders") list.push(check)
     }
     return list
   }
   readonly property bool showQr: phase === "waiting" && svc && svc.qrSize > 0 && !svc.pairingExpired
-  readonly property bool previewWanted: opened && (phase === "live" || phase === "silent")
-  readonly property string sessionDevice: svc && svc.sessionRecord && svc.sessionRecord.device
-    ? String(svc.sessionRecord.device)
-    : "/dev/video10"
+  readonly property string holdersLine: svc && svc.holdersLine ? String(svc.holdersLine) : "No app is using PhoneCam"
 
   function pushSettings() {
     if (svc && "settings" in svc) svc.settings = settings
@@ -61,21 +57,6 @@ Panel {
     if (!svc) return
     if (svc.canStop) svc.stop()
     else svc.start()
-  }
-
-  function selectedPhoneCam() {
-    var inputs = mediaDevices.videoInputs
-    if (!inputs) return null
-    for (var i = 0; i < inputs.length; i++) {
-      if (Model.isPhoneCamDevice(inputs[i], root.sessionDevice, "PhoneCam"))
-        return inputs[i]
-    }
-    return null
-  }
-
-  readonly property var phoneCam: {
-    var _dep = mediaDevices.videoInputs
-    return selectedPhoneCam()
   }
 
   onSettingsChanged: pushSettings()
@@ -96,19 +77,12 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  MediaDevices {
-    id: mediaDevices
-  }
-
-  CaptureSession {
-    camera: previewCamera
-    videoOutput: previewOut
-  }
-
-  Camera {
-    id: previewCamera
-    cameraDevice: root.phoneCam
-    active: root.previewWanted && root.phoneCam != null
+  Timer {
+    interval: 2000
+    repeat: true
+    running: root.opened
+    triggeredOnStart: true
+    onTriggered: if (root.svc) root.svc.refreshDoctor()
   }
 
   IpcHandler {
@@ -324,37 +298,14 @@ Panel {
               fontFamily: root.fontFamily
             }
 
-            Rectangle {
-              id: previewFrame
+            Text {
               width: parent.width
-              height: Math.round(width * 9 / 16)
-              radius: Style.cornerRadius
-              color: "#111111"
-              clip: true
-
-              VideoOutput {
-                id: previewOut
-                anchors.fill: parent
-                fillMode: VideoOutput.PreserveAspectFit
-                visible: previewCamera.active
-              }
-
-              Text {
-                visible: !previewOut.visible
-                anchors.centerIn: parent
-                width: parent.width - Style.space(16)
-                text: {
-                  if (!root.previewWanted) return ""
-                  if (previewCamera.error !== Camera.NoError) return previewCamera.errorString
-                  if (!root.selectedPhoneCam()) return "PhoneCam is not in the camera list yet"
-                  return "Waiting for PhoneCam frames"
-                }
-                color: "#bbbbbb"
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-                horizontalAlignment: Text.AlignHCenter
-              }
+              text: root.holdersLine
+              color: root.holdersLine.indexOf("In use:") === 0 ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
             }
 
             Text {

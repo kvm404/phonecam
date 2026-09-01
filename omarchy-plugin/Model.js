@@ -29,6 +29,85 @@ function parseDoctor(text) {
   return checks
 }
 
+var HOLDER_APP_LABELS = [
+  ["discord", "Discord"],
+  ["chrome", "Chrome"],
+  ["chromium", "Chromium"],
+  ["firefox", "Firefox"],
+  ["zoom", "Zoom"],
+  ["obs", "OBS"],
+  ["cheese", "Cheese"],
+  ["slack", "Slack"],
+  ["teams", "Teams"],
+  ["skype", "Skype"],
+  ["signal", "Signal"],
+  ["telegram", "Telegram"]
+]
+
+function classifyHolder(name) {
+  var raw = String(name || "").trim()
+  if (raw === "") return null
+  var lower = raw.toLowerCase()
+  if (lower.indexOf("gst-launch") === 0 || lower === "gst-launch-1.0") {
+    return { raw: raw, kind: "receiver", label: "PhoneCam receiver" }
+  }
+  if (lower.indexOf("quickshell") !== -1 || lower.indexOf("omarchy-shell") !== -1) {
+    return { raw: raw, kind: "shell", label: "Omarchy shell" }
+  }
+  for (var i = 0; i < HOLDER_APP_LABELS.length; i++) {
+    if (lower.indexOf(HOLDER_APP_LABELS[i][0]) !== -1) {
+      return { raw: raw, kind: "app", label: HOLDER_APP_LABELS[i][1] }
+    }
+  }
+  return { raw: raw, kind: "app", label: raw }
+}
+
+function parseHolders(checks) {
+  if (!(checks instanceof Array)) return []
+  for (var i = 0; i < checks.length; i++) {
+    var check = checks[i]
+    if (!check || check.name !== "Virtual camera holders") continue
+    if (check.status !== "WARN") return []
+    var msg = String(check.message || "")
+    var marker = "open by "
+    var at = msg.indexOf(marker)
+    if (at < 0) return []
+    var parts = msg.substring(at + marker.length).split(",")
+    var out = []
+    for (var j = 0; j < parts.length; j++) {
+      var item = classifyHolder(parts[j])
+      if (item) out.push(item)
+    }
+    return out
+  }
+  return []
+}
+
+function holdersHeadline(holders) {
+  if (!(holders instanceof Array) || holders.length === 0) {
+    return "No app is using PhoneCam"
+  }
+  var apps = []
+  var seen = {}
+  var receiver = false
+  for (var i = 0; i < holders.length; i++) {
+    var h = holders[i]
+    if (!h) continue
+    if (h.kind === "receiver") {
+      receiver = true
+      continue
+    }
+    if (h.kind === "shell") continue
+    var label = String(h.label || h.raw || "")
+    if (label === "" || seen[label]) continue
+    seen[label] = true
+    apps.push(label)
+  }
+  if (apps.length > 0) return "In use: " + apps.join(" · ")
+  if (receiver) return "Ready — pick PhoneCam in an app"
+  return "No app is using PhoneCam"
+}
+
 function doctorBlocking(checks) {
   if (!(checks instanceof Array)) return false
   for (var i = 0; i < checks.length; i++) {
@@ -292,6 +371,9 @@ if (typeof module !== "undefined") {
     BLOCKING_DOCTOR_NAMES: BLOCKING_DOCTOR_NAMES,
     isBlockingDoctorName: isBlockingDoctorName,
     parseDoctor: parseDoctor,
+    classifyHolder: classifyHolder,
+    parseHolders: parseHolders,
+    holdersHeadline: holdersHeadline,
     doctorBlocking: doctorBlocking,
     parseStatus: parseStatus,
     parsePairing: parsePairing,

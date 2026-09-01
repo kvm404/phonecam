@@ -15,9 +15,9 @@ omarchy plugin enable io.github.kvm404.phonecam
 `install.sh` copies into `~/.config/omarchy/plugins/io.github.kvm404.phonecam`
 and prints the enable command. It does not enable the plugin itself.
 
-While the stream is live, the open panel shows PhoneCam with Qt Camera
-(same path as a normal webcam preview). It will not fall back to the
-laptop camera. Closing the panel releases the device.
+The panel does not preview video (that would fight Discord/Meet for
+`/dev/video10`). While LIVE it names the apps that currently have
+PhoneCam open. Pick **PhoneCam** in the meeting app as usual.
 
 Needs `phonecam` on PATH (or `~/.local/bin/phonecam`), `curl`, `setpriv`,
 `qrencode`, and Omarchy 4+ with Quickshell. Press Start in the panel; the

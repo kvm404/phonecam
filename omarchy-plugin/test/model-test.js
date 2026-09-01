@@ -165,6 +165,23 @@ test("parseSessionRecord keeps device path", function() {
   assert.strictEqual(rec.device, "/dev/video10")
 })
 
+test("holdersHeadline names Discord and ignores the gst receiver", function() {
+  const checks = Model.parseDoctor([
+    "[WARN] Virtual camera holders: /dev/video10 is already open by gst-launch-1.0, Discord",
+    "      Fix: Close those apps.",
+    "[PASS] Distro: Arch-family distro detected"
+  ].join("\n"))
+  const holders = Model.parseHolders(checks)
+  assert.strictEqual(holders.length, 2)
+  assert.strictEqual(holders[0].kind, "receiver")
+  assert.strictEqual(holders[1].label, "Discord")
+  assert.strictEqual(Model.holdersHeadline(holders), "In use: Discord")
+  assert.strictEqual(Model.holdersHeadline([
+    { kind: "receiver", label: "PhoneCam receiver" }
+  ]), "Ready — pick PhoneCam in an app")
+  assert.strictEqual(Model.holdersHeadline([]), "No app is using PhoneCam")
+})
+
 test("previewHelperArgv pins /dev/video10 and never video0", function() {
   const argv = Model.previewHelperArgv(
     "/opt/plugin/bin/phonecam-preview",

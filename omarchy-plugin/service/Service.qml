@@ -29,6 +29,8 @@ Item {
   property var pairing: null
   property var doctorChecks: []
   property bool doctorBlocking: false
+  readonly property var holders: Model.parseHolders(doctorChecks)
+  readonly property string holdersLine: Model.holdersHeadline(holders)
   property var qrRows: []
   property int qrSize: 0
   property var trusted: []

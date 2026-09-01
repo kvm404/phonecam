@@ -74,12 +74,13 @@ It does not enable on its own.
   `gst-launch`.
 - Empty `binaryPath`: `PATH` `phonecam`, then `$HOME/.local/bin/phonecam`,
   then `$(go env GOPATH)/bin/phonecam`.
-- Live preview: Qt Multimedia `Camera` + `VideoOutput`, **only** if
-  `MediaDevices` lists PhoneCam (`description` contains PhoneCam or id
-  contains `video10`). `Camera.active` stays false on the default laptop
-  webcam (`setCameraDevice(null)` would otherwise pick it). Close the
-  panel to stop the capture. Do not open a second `gst-launch` on
-  `/dev/video10` (exclusive_caps makes `S_FMT` busy).
+- No live video in the panel. `exclusive_caps` on `/dev/video10` makes a
+  second capture (`gst-launch` or Qt Camera) steal or black the meeting
+  app. The plugin never opens the V4L2 node.
+- While LIVE, show **who holds** `/dev/video10` from `phonecam doctor`
+  (`Virtual camera holders`). `gst-launch-1.0` is the PhoneCam receiver;
+  Discord/Chrome/OBS/… are named as “In use: …”. Poll doctor while the
+  panel is open.
 
 ## QR
 
