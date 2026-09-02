@@ -576,7 +576,7 @@ class StreamingService : LifecycleService() {
             if (isFlip) {
                 cameraSelector = previous ?: oppositeSelector(requested)
                 try {
-                    bindUseCasesAfterUnbind(provider, cameraSelector)
+                    bindUseCasesAfterUnbind(provider, cameraSelector, resetTo1x = false)
                 } catch (rebind: Exception) {
                     stopStreaming(error = rebind.localizedMessage ?: rebind.toString())
                     return
@@ -601,6 +601,7 @@ class StreamingService : LifecycleService() {
     private fun bindUseCasesAfterUnbind(
         provider: ProcessCameraProvider,
         selector: CameraSelector,
+        resetTo1x: Boolean = true,
     ) {
         val analysis = buildAnalysis()
         // Seed the freshly-bound analyzer with the current device orientation so the first
@@ -609,21 +610,22 @@ class StreamingService : LifecycleService() {
         imageAnalysis = analysis
         provider.unbindAll()
         preview = null
-        bindUseCases(provider, selector, analysis)
+        bindUseCases(provider, selector, analysis, resetTo1x)
     }
 
     private fun bindUseCases(
         provider: ProcessCameraProvider,
         selector: CameraSelector,
         analysis: ImageAnalysis,
+        resetTo1x: Boolean,
     ) {
         if (previewWanted) {
             val previewUseCase = Preview.Builder().build()
             preview = previewUseCase
-            adoptCamera(provider.bindToLifecycle(this, selector, previewUseCase, analysis))
+            adoptCamera(provider.bindToLifecycle(this, selector, previewUseCase, analysis), resetTo1x)
         } else {
             preview = null
-            adoptCamera(provider.bindToLifecycle(this, selector, analysis))
+            adoptCamera(provider.bindToLifecycle(this, selector, analysis), resetTo1x)
         }
     }
 
@@ -651,7 +653,8 @@ class StreamingService : LifecycleService() {
      * Track a freshly-bound streaming camera: retain the handle for the zoom controls, watch
      * its zoom state so the LIVE readout and button bounds follow the real lens, and — for a
      * new bind (stream start, camera flip) — reset to 1x once the camera reports its range.
-     * A preview re-attach on the same lens passes [resetTo1x] = false to keep the user's zoom.
+     * A preview re-attach or a failed-flip fallback rebind on the same lens passes
+     * [resetTo1x] = false to keep the user's zoom.
      */
     private fun adoptCamera(bound: Camera, resetTo1x: Boolean = true) {
         zoomObserver?.let { camera?.cameraInfo?.zoomState?.removeObserver(it) }
