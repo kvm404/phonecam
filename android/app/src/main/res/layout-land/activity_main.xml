@@ -378,6 +378,54 @@
                     app:icon="@drawable/ic_preview_hide"
                     tools:visibility="visible" />
 
+                <LinearLayout
+                    android:id="@+id/zoomRow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="center"
+                    android:orientation="horizontal"
+                    android:visibility="gone"
+                    tools:visibility="visible">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/zoomOutButton"
+                        style="@style/Widget.PhoneCam.Button.Icon"
+                        android:layout_width="48dp"
+                        android:layout_height="48dp"
+                        android:contentDescription="@string/zoom_out_content_description"
+                        app:icon="@drawable/ic_zoom_out" />
+
+                    <TextView
+                        android:id="@+id/zoomReadout"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="56dp"
+                        android:fontFamily="monospace"
+                        android:gravity="center"
+                        android:letterSpacing="0.06"
+                        android:textColor="@color/pc_paper"
+                        android:textSize="14sp"
+                        tools:text="1x" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/zoomInButton"
+                        style="@style/Widget.PhoneCam.Button.Icon"
+                        android:layout_width="48dp"
+                        android:layout_height="48dp"
+                        android:contentDescription="@string/zoom_in_content_description"
+                        app:icon="@drawable/ic_zoom_in" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/zoomResetButton"
+                        style="@style/Widget.PhoneCam.Button.Icon"
+                        android:layout_width="48dp"
+                        android:layout_height="48dp"
+                        android:layout_marginStart="12dp"
+                        android:contentDescription="@string/zoom_reset_content_description"
+                        app:icon="@drawable/ic_zoom_reset" />
+                </LinearLayout>
+
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/flipCameraButton"
                     style="@style/Widget.PhoneCam.Button.Outlined"

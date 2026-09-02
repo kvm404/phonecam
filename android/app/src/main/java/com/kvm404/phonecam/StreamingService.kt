@@ -20,17 +20,20 @@ import android.util.Log
 import android.util.Size
 import android.view.OrientationEventListener
 import android.widget.Toast
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.ZoomState
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.Observer
 import com.kvm404.phonecam.pairing.CameraFacing
 import com.kvm404.phonecam.pairing.HttpControlClient
 import com.kvm404.phonecam.pairing.PairingPayload
@@ -51,6 +54,7 @@ import com.kvm404.phonecam.streaming.FrameConverter
 import com.kvm404.phonecam.streaming.RtpPacketizer
 import com.kvm404.phonecam.streaming.UdpRtpSender
 import com.kvm404.phonecam.streaming.VideoEncoder
+import com.kvm404.phonecam.streaming.ZoomStepper
 import java.net.InetSocketAddress
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -132,6 +136,17 @@ object StreamingSession {
 }
 
 /**
+ * Immutable snapshot of the streaming camera's zoom, read off the live
+ * [androidx.camera.core.ZoomState]. Null while no camera is bound (or no zoom state has been
+ * delivered yet) so the activity can hide the zoom controls until the range is known.
+ */
+data class ZoomInfo(
+    val ratio: Float,
+    val minRatio: Float,
+    val maxRatio: Float,
+)
+
+/**
  * Camera foreground service that OWNS the streaming pipeline so it survives the screen
  * turning off, the lock screen, and the activity being destroyed — the whole point of the
  * feature. It mirrors what [MainActivity] used to do inline: CameraX (Preview +
@@ -144,7 +159,8 @@ object StreamingSession {
  * the orientation helpers) are reused verbatim.
  *
  * The activity binds via [LocalBinder] to attach/detach its live preview, flip the camera,
- * stop the stream, and observe start/stop through a [Callback]. Streaming is unaffected by
+ * drive the streaming camera's zoom, stop the stream, and observe start/stop through a
+ * [Callback]. Streaming is unaffected by
  * the activity binding, unbinding, or being destroyed; it stops only on the Leave button,
  * the notification Stop action, an encoder/camera error, or a 60 s reconnect give-up.
  * Send errors and brief Wi-Fi loss do not stop it.
@@ -168,6 +184,9 @@ class StreamingService : LifecycleService() {
 
         /** Flip or first-bind facing was unavailable; the previous lens is still live. */
         fun onNoOtherCamera() {}
+
+        /** The streaming camera's zoom state/range changed; refresh the zoom row. */
+        fun onZoomChanged() {}
     }
 
     inner class LocalBinder : Binder() {
@@ -187,6 +206,21 @@ class StreamingService : LifecycleService() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var preview: Preview? = null
     private var imageAnalysis: ImageAnalysis? = null
+
+    /**
+     * The [Camera] handle returned by the streaming bindToLifecycle, retained so the zoom
+     * controls can drive [Camera.getCameraControl]. Null while no camera is bound.
+     */
+    private var camera: Camera? = null
+    private var zoomObserver: Observer<ZoomState>? = null
+
+    /** Latest zoom snapshot from the live camera; written on the main thread. */
+    @Volatile
+    private var zoomInfo: ZoomInfo? = null
+
+    /** Set when a camera binds (stream start, flip) so its first zoom state resets to 1x. */
+    @Volatile
+    private var pendingZoomReset = false
 
     private var canvas: VideoProfile? = null
     private var payload: PairingPayload? = null
@@ -353,6 +387,30 @@ class StreamingService : LifecycleService() {
         bindCamera(isFlip = true, previous = previous)
     }
 
+    /** Latest zoom snapshot from the streaming camera, or null when no range is known. */
+    fun currentZoom(): ZoomInfo? = zoomInfo
+
+    /** One 0.25x step in, clamped to the live camera's max ratio. */
+    fun zoomIn() {
+        applyZoom { info -> ZoomStepper.stepUp(info.ratio, info.maxRatio) }
+    }
+
+    /** One 0.25x step out, clamped to the live camera's min ratio. */
+    fun zoomOut() {
+        applyZoom { info -> ZoomStepper.stepDown(info.ratio, info.minRatio) }
+    }
+
+    /** Reset to 1x, clamped into the live camera's range. */
+    fun resetZoom() {
+        applyZoom { info -> ZoomStepper.resetTarget(info.minRatio, info.maxRatio) }
+    }
+
+    private fun applyZoom(step: (ZoomInfo) -> Float) {
+        if (!streaming) return
+        val info = zoomInfo ?: return
+        camera?.cameraControl?.setZoomRatio(step(info))
+    }
+
     /** User-initiated stop (Leave button). Tears down and removes the service. */
     fun stopFromActivity() {
         stopStreaming(error = null)
@@ -443,6 +501,11 @@ class StreamingService : LifecycleService() {
         unregisterWifiCallback()
         stopOrientationTracking()
         orientationListener = null
+        zoomObserver?.let { camera?.cameraInfo?.zoomState?.removeObserver(it) }
+        zoomObserver = null
+        camera = null
+        zoomInfo = null
+        pendingZoomReset = false
         imageAnalysis?.clearAnalyzer()
         imageAnalysis = null
         preview = null
@@ -557,10 +620,10 @@ class StreamingService : LifecycleService() {
         if (previewWanted) {
             val previewUseCase = Preview.Builder().build()
             preview = previewUseCase
-            provider.bindToLifecycle(this, selector, previewUseCase, analysis)
+            adoptCamera(provider.bindToLifecycle(this, selector, previewUseCase, analysis))
         } else {
             preview = null
-            provider.bindToLifecycle(this, selector, analysis)
+            adoptCamera(provider.bindToLifecycle(this, selector, analysis))
         }
     }
 
@@ -568,8 +631,10 @@ class StreamingService : LifecycleService() {
         if (preview != null) return
         val previewUseCase = Preview.Builder().build()
         try {
-            provider.bindToLifecycle(this, cameraSelector, previewUseCase)
+            val bound = provider.bindToLifecycle(this, cameraSelector, previewUseCase)
             preview = previewUseCase
+            // A preview (re-)attach joins the already-streaming lens: keep its zoom untouched.
+            adoptCamera(bound, resetTo1x = false)
         } catch (_: Exception) {
             preview = null
         }
@@ -580,6 +645,35 @@ class StreamingService : LifecycleService() {
         existing.surfaceProvider = null
         provider.unbind(existing)
         preview = null
+    }
+
+    /**
+     * Track a freshly-bound streaming camera: retain the handle for the zoom controls, watch
+     * its zoom state so the LIVE readout and button bounds follow the real lens, and — for a
+     * new bind (stream start, camera flip) — reset to 1x once the camera reports its range.
+     * A preview re-attach on the same lens passes [resetTo1x] = false to keep the user's zoom.
+     */
+    private fun adoptCamera(bound: Camera, resetTo1x: Boolean = true) {
+        zoomObserver?.let { camera?.cameraInfo?.zoomState?.removeObserver(it) }
+        camera = bound
+        if (resetTo1x) {
+            // Drop the previous lens' snapshot: the range is unknown until the new camera
+            // opens, and the pending reset below applies the correct clamp when it does.
+            zoomInfo = null
+            pendingZoomReset = true
+        }
+        val observer = Observer<ZoomState> { state ->
+            zoomInfo = ZoomInfo(state.zoomRatio, state.minZoomRatio, state.maxZoomRatio)
+            if (pendingZoomReset) {
+                pendingZoomReset = false
+                camera?.cameraControl?.setZoomRatio(
+                    ZoomStepper.resetTarget(state.minZoomRatio, state.maxZoomRatio),
+                )
+            }
+            callback?.onZoomChanged()
+        }
+        zoomObserver = observer
+        bound.cameraInfo.zoomState.observeForever(observer)
     }
 
     private fun buildAnalysis(): ImageAnalysis {
