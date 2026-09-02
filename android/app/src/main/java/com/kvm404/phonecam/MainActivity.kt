@@ -155,9 +155,6 @@ class MainActivity : AppCompatActivity() {
     @Volatile
     private var leaveRequested = false
 
-    /** Local viewfinder only. The laptop stream is independent of this flag. */
-    private var previewVisible = true
-
     private var stopWatchJob: Job? = null
     @Volatile
     private var waitingToStartService = false
@@ -367,12 +364,10 @@ class MainActivity : AppCompatActivity() {
         binding.zoomInButton.setOnClickListener { streamingService?.zoomIn() }
         binding.zoomOutButton.setOnClickListener { streamingService?.zoomOut() }
         binding.zoomResetButton.setOnClickListener { streamingService?.resetZoom() }
-        binding.previewToggleButton.setOnClickListener { togglePreviewVisible() }
         binding.previewCard.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
             if (right - left != oldRight - oldLeft) applyPreviewAspect()
         }
         setupQualitySelector()
-        previewVisible = prefs().getBoolean(PREF_PREVIEW_VISIBLE, true)
     }
 
     /**
@@ -830,7 +825,6 @@ class MainActivity : AppCompatActivity() {
 
         persistTrustedLaptop(current, paired.pairingSecret)
 
-        StreamingService.pendingPreviewWanted = previewVisible
         StreamingSession.payload = current
         StreamingSession.profile = profile
         StreamingSession.rtpIdentity = rtp
@@ -907,30 +901,28 @@ class MainActivity : AppCompatActivity() {
             binding.liveStatus.text = getString(R.string.live_reconnecting, name)
             binding.liveRecBadge.visibility = View.GONE
             binding.liveConnectingProgress.visibility = View.VISIBLE
-            binding.previewToggleButton.visibility = View.VISIBLE
             binding.leaveButton.visibility = View.VISIBLE
             binding.leaveButton.setText(R.string.btn_leave)
-            applyPreviewVisibility()
+            // Viewfinder is always visible while streaming; (re)hook its surface.
+            attachPreviewIfLive()
             updateBatteryHint()
         } else if (streaming) {
             val name = streamingService?.laptopName() ?: payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_status, name)
             binding.liveRecBadge.visibility = View.VISIBLE
             binding.liveConnectingProgress.visibility = View.GONE
-            binding.previewToggleButton.visibility = View.VISIBLE
             binding.leaveButton.setText(R.string.btn_leave)
-            applyPreviewVisibility()
+            // Viewfinder is always visible while streaming; (re)hook its surface.
+            attachPreviewIfLive()
             updateBatteryHint()
         } else {
             val name = payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_connecting, name)
             binding.liveRecBadge.visibility = View.GONE
             binding.liveConnectingProgress.visibility = View.VISIBLE
-            binding.previewToggleButton.visibility = View.GONE
             binding.leaveButton.setText(R.string.btn_cancel)
             binding.liveBatteryHint.visibility = View.GONE
             binding.previewCard.visibility = View.VISIBLE
-            binding.previewHiddenHint.visibility = View.GONE
         }
         updateZoomRow()
     }
@@ -958,34 +950,6 @@ class MainActivity : AppCompatActivity() {
         binding.zoomResetButton.alpha = if (resetEnabled) 1f else DISABLED_BUTTON_ALPHA
     }
 
-    private fun togglePreviewVisible() {
-        previewVisible = !previewVisible
-        prefs().edit().putBoolean(PREF_PREVIEW_VISIBLE, previewVisible).apply()
-        applyPreviewVisibility()
-    }
-
-    private fun applyPreviewVisibility() {
-        if (screenState != ScreenState.LIVE) return
-        binding.previewCard.visibility = if (previewVisible) View.VISIBLE else View.GONE
-        binding.previewHiddenHint.visibility = if (previewVisible) View.GONE else View.VISIBLE
-        if (previewVisible) {
-            binding.previewToggleButton.setText(R.string.btn_hide_preview)
-            binding.previewToggleButton.setIconResource(R.drawable.ic_preview_hide)
-            if (isStreaming()) {
-                streamingService?.setPreviewWanted(true)
-                attachPreviewIfLive()
-            }
-            sizePreviewCard(
-                streamingService?.profile()?.width ?: committedProfile?.width ?: selectedQuality.width,
-                streamingService?.profile()?.height ?: committedProfile?.height ?: selectedQuality.height,
-            )
-        } else {
-            binding.previewToggleButton.setText(R.string.btn_show_preview)
-            binding.previewToggleButton.setIconResource(R.drawable.ic_preview_show)
-            streamingService?.setPreviewWanted(false)
-        }
-    }
-
     /** One-line hint when battery optimizations are NOT exempted for this app. */
     private fun updateBatteryHint() {
         val power = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -995,7 +959,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Attach the live preview to the service's Preview use case while visible + streaming. */
     private fun attachPreviewIfLive() {
-        if (screenState == ScreenState.LIVE && isStreaming() && previewVisible) {
+        if (screenState == ScreenState.LIVE && isStreaming()) {
             streamingService?.attachPreview(binding.livePreview.surfaceProvider)
         }
     }
@@ -1112,10 +1076,7 @@ class MainActivity : AppCompatActivity() {
         // Close a not-yet-handed-off RTP socket, if any (pairing was still in flight).
         rtpIdentity?.close()
     }
-
     private companion object {
-        const val PREF_PREVIEW_VISIBLE = "preview_visible"
-
         /** Zoom buttons dim at their bounds; the outlined style's static tints don't fade. */
         const val DISABLED_BUTTON_ALPHA = 0.38f
     }

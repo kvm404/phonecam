@@ -262,10 +262,6 @@ class StreamingService : LifecycleService() {
 
     private var cameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
-    /** When false, only ImageAnalysis is bound — the laptop stream is unchanged. */
-    @Volatile
-    private var previewWanted = true
-
     @Volatile
     private var deviceOrientation = 0
     private var orientationListener: OrientationEventListener? = null
@@ -353,22 +349,6 @@ class StreamingService : LifecycleService() {
         preview?.surfaceProvider = null
     }
 
-    /**
-     * Bind or drop the local Preview use case. ImageAnalysis (the encode path) stays bound,
-     * so hiding the viewfinder does not pause the laptop stream.
-     */
-    fun setPreviewWanted(wanted: Boolean) {
-        if (previewWanted == wanted) return
-        previewWanted = wanted
-        if (!streaming) return
-        val provider = cameraProvider ?: return
-        if (wanted) {
-            enablePreviewUseCase(provider)
-        } else {
-            disablePreviewUseCase(provider)
-        }
-    }
-
     fun canFlipCamera(): Boolean {
         val provider = cameraProvider ?: return false
         return try {
@@ -434,7 +414,6 @@ class StreamingService : LifecycleService() {
         resumeToken = handoff.resumeToken
         pairingSecret = handoff.pairingSecret
         phone = handoff.phone
-        previewWanted = pendingPreviewWanted
 
         startForegroundNotification(current.name)
 
@@ -619,42 +598,19 @@ class StreamingService : LifecycleService() {
         analysis: ImageAnalysis,
         resetTo1x: Boolean,
     ) {
-        if (previewWanted) {
-            val previewUseCase = Preview.Builder().build()
-            preview = previewUseCase
-            adoptCamera(provider.bindToLifecycle(this, selector, previewUseCase, analysis), resetTo1x)
-        } else {
-            preview = null
-            adoptCamera(provider.bindToLifecycle(this, selector, analysis), resetTo1x)
-        }
-    }
-
-    private fun enablePreviewUseCase(provider: ProcessCameraProvider) {
-        if (preview != null) return
+        // The local viewfinder is always on: Preview is bound together with ImageAnalysis
+        // for the whole session.
         val previewUseCase = Preview.Builder().build()
-        try {
-            val bound = provider.bindToLifecycle(this, cameraSelector, previewUseCase)
-            preview = previewUseCase
-            // A preview (re-)attach joins the already-streaming lens: keep its zoom untouched.
-            adoptCamera(bound, resetTo1x = false)
-        } catch (_: Exception) {
-            preview = null
-        }
-    }
-
-    private fun disablePreviewUseCase(provider: ProcessCameraProvider) {
-        val existing = preview ?: return
-        existing.surfaceProvider = null
-        provider.unbind(existing)
-        preview = null
+        preview = previewUseCase
+        adoptCamera(provider.bindToLifecycle(this, selector, previewUseCase, analysis), resetTo1x)
     }
 
     /**
      * Track a freshly-bound streaming camera: retain the handle for the zoom controls, watch
      * its zoom state so the LIVE readout and button bounds follow the real lens, and — for a
      * new bind (stream start, camera flip) — reset to 1x once the camera reports its range.
-     * A preview re-attach or a failed-flip fallback rebind on the same lens passes
-     * [resetTo1x] = false to keep the user's zoom.
+     * A failed-flip fallback rebind on the same lens passes [resetTo1x] = false so the
+     * re-opened lens keeps the user's last ratio once it reports.
      */
     private fun adoptCamera(bound: Camera, resetTo1x: Boolean = true) {
         zoomObserver?.let { camera?.cameraInfo?.zoomState?.removeObserver(it) }
@@ -1117,10 +1073,6 @@ class StreamingService : LifecycleService() {
         @Volatile
         var isRunning = false
             private set
-
-        /** Read once at [startStreaming] so the first bind can skip the viewfinder. */
-        @Volatile
-        var pendingPreviewWanted = true
 
         private const val CHANNEL_ID = "phonecam_streaming"
         private const val NOTIFICATION_ID = 1
