@@ -21,7 +21,8 @@ latency measurement harness are non-goals.
 - GUI tray.
 - systemd user service.
 - Multi-camera or multi-phone sessions.
-- Torch and other advanced camera controls.
+- Torch and other advanced camera controls. Camera zoom is now in scope per
+  [ADR 0002](adr/0002-camera-zoom-controls.md); torch remains cancelled.
 - Distro packages.
 
 ## Architecture

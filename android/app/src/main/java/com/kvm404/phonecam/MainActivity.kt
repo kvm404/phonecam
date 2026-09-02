@@ -61,6 +61,7 @@ import com.kvm404.phonecam.pairing.StreamQuality
 import com.kvm404.phonecam.pairing.TrustedLaptop
 import com.kvm404.phonecam.pairing.TrustedLaptops
 import com.kvm404.phonecam.pairing.VideoProfile
+import com.kvm404.phonecam.streaming.ZoomStepper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -217,6 +218,10 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this@MainActivity, R.string.no_other_camera, Toast.LENGTH_SHORT).show()
             }
         }
+
+        override fun onZoomChanged() {
+            runOnUiThread { updateZoomRow() }
+        }
     }
 
     private val phoneIdentity: PhoneIdentity by lazy {
@@ -359,6 +364,9 @@ class MainActivity : AppCompatActivity() {
             streamingService?.flipCamera()
             attachPreviewIfLive()
         }
+        binding.zoomInButton.setOnClickListener { streamingService?.zoomIn() }
+        binding.zoomOutButton.setOnClickListener { streamingService?.zoomOut() }
+        binding.zoomResetButton.setOnClickListener { streamingService?.resetZoom() }
         binding.previewToggleButton.setOnClickListener { togglePreviewVisible() }
         binding.previewCard.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
             if (right - left != oldRight - oldLeft) applyPreviewAspect()
@@ -924,6 +932,30 @@ class MainActivity : AppCompatActivity() {
             binding.previewCard.visibility = View.VISIBLE
             binding.previewHiddenHint.visibility = View.GONE
         }
+        updateZoomRow()
+    }
+
+    /**
+     * Reflect the streaming camera's zoom in the LIVE zoom row: readout, button bounds, and
+     * the whole row's visibility (hidden while connecting and for lenses without a zoom
+     * range, e.g. many front cameras). State arrives from [StreamingService.Callback.onZoomChanged].
+     */
+    private fun updateZoomRow() {
+        if (screenState != ScreenState.LIVE) return
+        val zoom = if (isStreaming()) streamingService?.currentZoom() else null
+        val show = zoom != null && ZoomStepper.shouldShow(zoom.maxRatio)
+        binding.zoomRow.visibility = if (show) View.VISIBLE else View.GONE
+        if (zoom == null || !show) return
+        binding.zoomReadout.text = ZoomStepper.format(zoom.ratio)
+        val zoomInEnabled = ZoomStepper.canZoomIn(zoom.ratio, zoom.maxRatio)
+        val zoomOutEnabled = ZoomStepper.canZoomOut(zoom.ratio, zoom.minRatio)
+        val resetEnabled = ZoomStepper.canReset(zoom.ratio, zoom.minRatio, zoom.maxRatio)
+        binding.zoomInButton.isEnabled = zoomInEnabled
+        binding.zoomInButton.alpha = if (zoomInEnabled) 1f else DISABLED_BUTTON_ALPHA
+        binding.zoomOutButton.isEnabled = zoomOutEnabled
+        binding.zoomOutButton.alpha = if (zoomOutEnabled) 1f else DISABLED_BUTTON_ALPHA
+        binding.zoomResetButton.isEnabled = resetEnabled
+        binding.zoomResetButton.alpha = if (resetEnabled) 1f else DISABLED_BUTTON_ALPHA
     }
 
     private fun togglePreviewVisible() {
@@ -1083,5 +1115,8 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val PREF_PREVIEW_VISIBLE = "preview_visible"
+
+        /** Zoom buttons dim at their bounds; the outlined style's static tints don't fade. */
+        const val DISABLED_BUTTON_ALPHA = 0.38f
     }
 }

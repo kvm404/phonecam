@@ -8,6 +8,8 @@ the other unscheduled items that used to live here are cancelled — not deferre
 
 Omarchy bar plugin (`omarchy-plugin/`, id `io.github.kvm404.phonecam`): start/stop, pairing QR, status, doctor, trust. Wraps the v0.2 CLI. Not USB, audio, tray, or systemd.
 
+Camera zoom controls on the LIVE screen: 0.25x steps, reset to 1x on stream start and flip, hidden when the lens has no zoom range.
+
 ## v0.1: Local Wi-Fi MVP
 
 - Android app.

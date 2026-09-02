@@ -85,6 +85,16 @@
         <item name="rippleColor">@color/pc_line</item>
     </style>
 
+    <style name="Widget.PhoneCam.Button.Icon" parent="Widget.PhoneCam.Button.Outlined">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:insetLeft">0dp</item>
+        <item name="android:insetRight">0dp</item>
+        <item name="android:paddingStart">0dp</item>
+        <item name="android:paddingEnd">0dp</item>
+        <item name="iconGravity">textStart</item>
+        <item name="iconPadding">0dp</item>
+    </style>
+
     <style name="Widget.PhoneCam.Button.Leave" parent="Widget.PhoneCam.Button.Outlined">
         <item name="strokeColor">#5A2A24</item>
         <item name="backgroundTint">#1A1212</item>
