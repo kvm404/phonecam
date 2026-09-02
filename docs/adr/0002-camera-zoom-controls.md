@@ -29,9 +29,9 @@ The LIVE screen gains zoom in, zoom out, and reset controls:
 - Ratios are clamped to the camera's device-reported range
   (`ZoomState.minZoomRatio` / `maxZoomRatio`); buttons disable at the bounds.
 - The zoom row is hidden entirely when the active lens has no zoom range.
-- Zoom resets to 1x when a stream starts and when the camera flips.
-  Re-attaching the preview to the already-streaming lens keeps the user's
-  zoom.
+- Zoom resets to 1x when a stream starts and when the camera flips. A
+  failed-flip fallback rebind of the same lens passes the keep-zoom flag so
+  the re-opened lens restores the user's last ratio once it reports.
 
 ## Alternatives Considered
 
