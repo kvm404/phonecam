@@ -17,6 +17,7 @@ import (
 
 	"github.com/kvm404/phonecam/linux-cli/internal/doctor"
 	"github.com/kvm404/phonecam/linux-cli/internal/lifecycle"
+	"github.com/kvm404/phonecam/linux-cli/internal/setup"
 	"github.com/kvm404/phonecam/linux-cli/internal/smoke"
 	"github.com/kvm404/phonecam/linux-cli/internal/start"
 	"github.com/kvm404/phonecam/linux-cli/internal/trust"
@@ -45,6 +46,10 @@ func (OSSystem) LookPath(name string) (string, error) {
 
 func (OSSystem) RunCommand(name string, args ...string) error {
 	return exec.Command(name, args...).Run()
+}
+
+func (OSSystem) CommandOutput(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).Output()
 }
 
 func (OSSystem) Exists(path string) bool {
@@ -185,6 +190,8 @@ func Run(ctx context.Context, sys doctor.System, args []string, stdout, stderr i
 			return code
 		}
 		return lifecycle.NewManager(nil, nil, nil).Stop(stdout, stderr)
+	case "setup":
+		return runSetup(sys, args[1:], stdout, stderr)
 	case "install":
 		printInstall(sys, stdout)
 		return 0
@@ -327,6 +334,53 @@ func runTrust(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+func runSetup(sys doctor.System, args []string, stdout, stderr io.Writer) int {
+	dryRun, code, ok := parseSetupFlags(args, stderr)
+	if !ok {
+		return code
+	}
+	host := setupSystem(sys)
+	if err := setup.Run(host, setup.Config{DryRun: dryRun}, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "phonecam setup failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func setupSystem(sys doctor.System) setup.System {
+	if s, ok := sys.(setup.System); ok {
+		return s
+	}
+	return setup.OSSystem{}
+}
+
+func parseSetupFlags(args []string, stderr io.Writer) (dryRun bool, code int, ok bool) {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprint(stderr, `Usage: phonecam setup [--dry-run]
+
+Install GStreamer and v4l2loopback, load /dev/video10, and persist the
+virtual camera across reboot. Requires root (sudo phonecam setup).
+
+Flags:
+  --dry-run    Print the action plan without changing the system
+`)
+	}
+	dry := fs.Bool("dry-run", false, "print the action plan without changing the system")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return false, 0, false
+		}
+		return false, 2, false
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "phonecam setup: unexpected argument %s\n", fs.Arg(0))
+		return false, 2, false
+	}
+	return *dry, 0, true
+}
+
 func printHelp(w io.Writer) {
 	fmt.Fprint(w, `PhoneCam
 
@@ -342,6 +396,8 @@ Commands:
   status     Show whether PhoneCam is running and its pairing state
   stop       Stop the running PhoneCam receiver
   doctor     Check Linux dependencies and setup
+  setup      Install Linux deps and persist the virtual camera (requires root)
+             (flag: --dry-run to print the plan without changing the system)
   install    Print distro dependency hints
   trust      List or revoke remembered phones
              (list | revoke <id-or-name> | revoke-all)
@@ -352,7 +408,7 @@ Commands:
 
 func printInstall(sys doctor.System, w io.Writer) {
 	family := doctor.DistroFamily(sys)
-	fmt.Fprintln(w, "PhoneCam install hints")
+	fmt.Fprintln(w, "PhoneCam install hints (print-only; to apply them run: sudo phonecam setup)")
 	fmt.Fprintln(w)
 
 	switch family {

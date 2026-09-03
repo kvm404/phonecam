@@ -63,7 +63,7 @@ func TestVerify(t *testing.T) {
 			device:  "/dev/video10",
 			sys:     fakeSystem{},
 			wantErr: true,
-			want:    []string{"does not exist", "video_nr=10", "card_label=PhoneCam", "/dev/video10"},
+			want:    []string{"does not exist", "sudo phonecam setup", "/dev/video10"},
 		},
 		{
 			name:    "device missing custom number",

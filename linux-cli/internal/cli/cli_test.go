@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kvm404/phonecam/linux-cli/internal/setup"
 	"github.com/kvm404/phonecam/linux-cli/internal/start"
 	"github.com/kvm404/phonecam/linux-cli/internal/trust"
 )
@@ -31,6 +32,10 @@ func (f fakeSystem) LookPath(name string) (string, error) {
 
 func (f fakeSystem) RunCommand(name string, args ...string) error {
 	return nil
+}
+
+func (f fakeSystem) CommandOutput(name string, args ...string) ([]byte, error) {
+	return nil, nil
 }
 
 func (f fakeSystem) Exists(path string) bool {
@@ -82,6 +87,61 @@ func TestRunHelpListsSmokeCommand(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "smoke      Run a local RTP loopback self-test") {
 		t.Fatalf("expected smoke command in help, got:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "setup      Install Linux deps and persist the virtual camera") {
+		t.Fatalf("expected setup command in help, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunSetupUnknownFlagExits2(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(nil, fakeSystem{}, []string{"setup", "--bogus"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d", code)
+	}
+	if stderr.Len() == 0 {
+		t.Fatal("expected error on stderr")
+	}
+}
+
+func TestParseSetupFlagsDryRun(t *testing.T) {
+	var stderr bytes.Buffer
+	dry, code, ok := parseSetupFlags([]string{"--dry-run"}, &stderr)
+	if !ok || code != 0 {
+		t.Fatalf("expected ok, got ok=%v code=%d stderr=%s", ok, code, stderr.String())
+	}
+	if !dry {
+		t.Fatal("expected --dry-run")
+	}
+}
+
+func TestRunSetupRefusesNonRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root")
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(nil, fakeSystem{}, []string{"setup"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "sudo phonecam setup") {
+		t.Fatalf("expected sudo phonecam setup message, got:\n%s", stderr.String())
+	}
+}
+
+func TestRunSetupDryRunNoRoot(t *testing.T) {
+	sys := newSetupFake()
+	var stdout, stderr bytes.Buffer
+	code := Run(nil, sys, []string{"setup", "--dry-run"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "dry-run") || !strings.Contains(out, "No changes were made") {
+		t.Fatalf("expected dry-run plan, got:\n%s", out)
+	}
+	if sys.mut.wrote != 0 || sys.mut.mutated != 0 {
+		t.Fatalf("dry-run mutated the system: wrote=%d mutated=%d ran=%v", sys.mut.wrote, sys.mut.mutated, sys.mut.ran)
 	}
 }
 
@@ -329,4 +389,58 @@ func TestRunInstallPrioritizesDetectedDistro(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Fatalf("expected no stderr, got:\n%s", stderr.String())
 	}
+}
+
+type setupMut struct {
+	wrote   int
+	mutated int
+	ran     []string
+}
+
+type setupFake struct {
+	fakeSystem
+	euid  int
+	uname string
+	mut   *setupMut
+}
+
+func newSetupFake() setupFake {
+	return setupFake{
+		fakeSystem: fakeSystem{
+			files: map[string]string{
+				"/etc/os-release": "ID=arch\n",
+				"/etc/group":      "video:x:44:\n",
+			},
+			environment: map[string]string{"USER": "tester"},
+		},
+		euid:  1000,
+		uname: "6.10.1-arch1-1",
+		mut:   &setupMut{},
+	}
+}
+
+func (f setupFake) Geteuid() int { return f.euid }
+
+func (f setupFake) UnameRelease() (string, error) { return f.uname, nil }
+
+func (f setupFake) WriteFile(path string, data []byte, perm os.FileMode) error {
+	f.mut.wrote++
+	return nil
+}
+
+func (f setupFake) MkdirAll(path string, perm os.FileMode) error {
+	f.mut.wrote++
+	return nil
+}
+
+func (f setupFake) Run(name string, args ...string) error {
+	f.mut.ran = append(f.mut.ran, name)
+	if setup.MutatingCommand(name, args) {
+		f.mut.mutated++
+	}
+	return errors.New("not active")
+}
+
+func (f setupFake) Output(name string, args ...string) ([]byte, error) {
+	return nil, errors.New("none")
 }

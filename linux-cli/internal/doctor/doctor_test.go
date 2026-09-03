@@ -13,6 +13,7 @@ import (
 type fakeSystem struct {
 	paths           map[string]string
 	commandFailures map[string]bool
+	commandOutput   map[string]string
 	exists          map[string]bool
 	writable        map[string]bool
 	files           map[string]string
@@ -38,6 +39,23 @@ func (f fakeSystem) RunCommand(name string, args ...string) error {
 		return errors.New("command failed")
 	}
 	return nil
+}
+
+func (f fakeSystem) CommandOutput(name string, args ...string) ([]byte, error) {
+	key := name
+	for _, arg := range args {
+		key += " " + arg
+	}
+	if f.commandFailures[key] {
+		out := f.commandOutput[key]
+		return []byte(out), errors.New("command failed")
+	}
+	if f.commandOutput != nil {
+		if out, ok := f.commandOutput[key]; ok {
+			return []byte(out), nil
+		}
+	}
+	return nil, nil
 }
 
 func (f fakeSystem) Exists(path string) bool {
@@ -323,6 +341,73 @@ func TestOSReleaseValueHandlesQuotes(t *testing.T) {
 	}
 }
 
+func TestDistroFamily(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{name: "arch ID", files: map[string]string{"/etc/os-release": "ID=arch\n"}, want: "arch"},
+		{name: "arch ID_LIKE", files: map[string]string{"/etc/os-release": "ID=manjaro\nID_LIKE=\"arch linux\"\n"}, want: "arch"},
+		{name: "fedora ID", files: map[string]string{"/etc/os-release": "ID=fedora\nVERSION_ID=41\n"}, want: "fedora"},
+		{name: "fedora ID_LIKE", files: map[string]string{"/etc/os-release": "ID=nobara\nID_LIKE=fedora\n"}, want: "fedora"},
+		{name: "ubuntu", files: map[string]string{"/etc/os-release": "ID=ubuntu\nID_LIKE=debian\n"}, want: "debian"},
+		{name: "debian", files: map[string]string{"/etc/os-release": "ID=debian\n"}, want: "debian"},
+		{name: "unknown id", files: map[string]string{"/etc/os-release": "ID=nixos\n"}, want: "nixos"},
+		{name: "empty id", files: map[string]string{"/etc/os-release": "NAME=Empty\n"}, want: "unknown"},
+		{name: "unreadable os-release", files: nil, want: "unknown"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DistroFamily(fakeSystem{files: tc.files})
+			if got != tc.want {
+				t.Fatalf("DistroFamily=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFirewallCheckInfoWhenUFWAlreadyAllows(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		commandOutput: map[string]string{
+			"ufw status": `Status: active
+
+To                         Action      From
+--                         ------      ----
+47470/tcp                  ALLOW       Anywhere
+47471/udp                  ALLOW       Anywhere
+`,
+		},
+	}))
+	check := findCheck(t, report, "Firewall")
+	if check.Status != StatusInfo {
+		t.Fatalf("expected INFO when ufw already allows PhoneCam ports, got %s", check.Status)
+	}
+	if !strings.Contains(check.Message, "already allows PhoneCam ports") {
+		t.Fatalf("expected already-allows message, got %q", check.Message)
+	}
+	if check.Fix != "" {
+		t.Fatalf("expected no firewall fix when ports are already allowed, got %q", check.Fix)
+	}
+}
+
+func TestUFWStatusAllowsPhoneCam(t *testing.T) {
+	if UFWStatusAllowsPhoneCam("") {
+		t.Fatal("empty status must not look allowed")
+	}
+	allowed := `Status: active
+47470/tcp                  ALLOW       Anywhere
+47471/udp                  ALLOW       Anywhere
+`
+	if !UFWStatusAllowsPhoneCam(allowed) {
+		t.Fatal("expected both ports ALLOW to count as allowed")
+	}
+	tcpOnly := "47470/tcp ALLOW Anywhere\n"
+	if UFWStatusAllowsPhoneCam(tcpOnly) {
+		t.Fatal("tcp-only must not count as allowed")
+	}
+}
+
 func readySystem(overrides fakeSystem) fakeSystem {
 	base := fakeSystem{
 		paths: map[string]string{
@@ -355,6 +440,9 @@ func readySystem(overrides fakeSystem) fakeSystem {
 	}
 	if overrides.commandFailures != nil {
 		base.commandFailures = overrides.commandFailures
+	}
+	if overrides.commandOutput != nil {
+		base.commandOutput = overrides.commandOutput
 	}
 	if overrides.exists != nil {
 		base.exists = overrides.exists

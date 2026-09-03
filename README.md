@@ -23,8 +23,9 @@ Then install the Linux dependencies (GStreamer, `v4l2loopback`) and check your
 setup:
 
 ```sh
-phonecam install   # prints the exact packages, modprobe, and firewall commands
-phonecam doctor     # verifies everything is ready
+sudo phonecam setup   # installs packages, loads /dev/video10, persists across reboot
+phonecam install      # print-only package / modprobe / firewall hints
+phonecam doctor       # verifies everything is ready
 ```
 
 **2. Android app:** download the APK from
@@ -44,7 +45,7 @@ phonecam start      # on the laptop — shows a QR code
 
 ## Requirements
 
-- Linux with GStreamer and `v4l2loopback` (`phonecam install` sets these up).
+- Linux with GStreamer and `v4l2loopback` (`sudo phonecam setup` installs these).
 - Android 10+ (minSdk 26).
 - Phone and laptop on the same Wi-Fi / LAN.
 
