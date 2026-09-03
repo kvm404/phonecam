@@ -626,7 +626,7 @@ class MainActivity : AppCompatActivity() {
         }
         StreamingSession.clearAndClose()
         if (StreamingService.isRunning || bound) {
-            ContextCompat.startForegroundService(this, StreamingService.stopIntent(this))
+            startService(StreamingService.stopIntent(this))
         }
     }
 
@@ -935,7 +935,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateZoomRow() {
         if (screenState != ScreenState.LIVE) return
         val zoom = if (isStreaming()) streamingService?.currentZoom() else null
-        val show = zoom != null && ZoomStepper.shouldShow(zoom.maxRatio)
+        val show = zoom != null && ZoomStepper.shouldShow(zoom.minRatio, zoom.maxRatio)
         binding.zoomRow.visibility = if (show) View.VISIBLE else View.GONE
         if (zoom == null || !show) return
         binding.zoomReadout.text = ZoomStepper.format(zoom.ratio)

@@ -53,6 +53,17 @@ class RtpPacketizer(
         }
     }
 
+    /**
+     * Cache separate SPS and PPS parameter sets (e.g. from MediaCodec's
+     * INFO_OUTPUT_FORMAT_CHANGED buffers).
+     */
+    fun cacheParameterSets(sps: ByteArray, pps: ByteArray) {
+        val spsNals = splitAnnexB(sps)
+        cachedSps = if (spsNals.isNotEmpty()) spsNals[0] else sps
+        val ppsNals = splitAnnexB(pps)
+        cachedPps = if (ppsNals.isNotEmpty()) ppsNals[0] else pps
+    }
+
     /** Copy cached SPS/PPS onto this packetizer (used when SSRC/seq are replaced). */
     fun copyParameterSetsFrom(source: RtpPacketizer) {
         cachedSps = source.cachedSps?.copyOf()

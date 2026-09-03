@@ -105,6 +105,12 @@ class ZoomStepperTest {
         assertTrue(ZoomStepper.shouldShow(8.0f))
     }
 
+    @Test
+    fun `show the zoom row on ultra-wide lenses with max ratio 1x`() {
+        assertTrue(ZoomStepper.shouldShow(minZoomRatio = 0.5f, maxZoomRatio = 1.0f))
+        assertFalse(ZoomStepper.shouldShow(minZoomRatio = 1.0f, maxZoomRatio = 1.02f))
+    }
+
     // ------------------------------------------------------------------ formatting
 
     @Test

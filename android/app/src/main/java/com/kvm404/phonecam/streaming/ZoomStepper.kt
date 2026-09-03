@@ -48,6 +48,10 @@ object ZoomStepper {
         return currentRatio < target - EPSILON || currentRatio > target + EPSILON
     }
 
+    /** Hide the whole zoom row when the active lens cannot zoom. */
+    fun shouldShow(minZoomRatio: Float, maxZoomRatio: Float): Boolean =
+        (maxZoomRatio - minZoomRatio) > 0.05f
+
     /** Hide the whole zoom row when the active lens cannot zoom (maxZoomRatio <= 1.0). */
     fun shouldShow(maxZoomRatio: Float): Boolean = maxZoomRatio > RESET_RATIO
 

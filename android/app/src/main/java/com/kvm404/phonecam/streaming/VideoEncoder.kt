@@ -106,11 +106,11 @@ class VideoEncoder(
         }
         running = false
         codec = null
-        onError(
-            IllegalStateException(
-                "no compatible H.264 encoder configuration on this device", lastError,
-            ),
+        val error = IllegalStateException(
+            "no compatible H.264 encoder configuration on this device", lastError,
         )
+        onError(error)
+        throw error
     }
 
     /** Which optional config keys a [buildFormat] variant carries beyond the four mandatory keys. */
@@ -173,7 +173,7 @@ class VideoEncoder(
                 return
             }
 
-            if (inputColorFormat ==
+            val size = if (inputColorFormat ==
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
             ) {
                 // Flexible: stride-aware plane copy into the codec's input Image (the vivo path).
@@ -183,7 +183,12 @@ class VideoEncoder(
                     applyPendingParameters(c)
                     return
                 }
-                fillImage(image, frame)
+                try {
+                    fillImage(image, frame)
+                } finally {
+                    image.close()
+                }
+                c.getInputBuffer(index)?.capacity() ?: (frame.width * frame.height * 3 / 2)
             } else {
                 // Semi-planar (NV12) / planar (I420): write a tightly-packed frame into the raw
                 // input ByteBuffer at the configured width/height.
@@ -202,8 +207,8 @@ class VideoEncoder(
                 }
                 buffer.clear()
                 buffer.put(packed)
+                packed.size
             }
-            val size = frame.width * frame.height * 3 / 2
             c.queueInputBuffer(index, 0, size, frame.timestampUs, 0)
             applyPendingParameters(c)
         } catch (t: Throwable) {
@@ -334,20 +339,43 @@ class VideoEncoder(
                 }
                 return
             }
-            if (index < 0) continue // INFO_TRY_AGAIN_LATER / format or buffers changed
+            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                val newFormat = c.outputFormat
+                val sps = newFormat.getByteBuffer("csd-0")
+                val pps = newFormat.getByteBuffer("csd-1")
+                if (sps != null && pps != null) {
+                    val spsBytes = ByteArray(sps.remaining()).also { sps.get(it); sps.rewind() }
+                    val ppsBytes = ByteArray(pps.remaining()).also { pps.get(it); pps.rewind() }
+                    synchronized(rtpLock) { packetizer.cacheParameterSets(spsBytes, ppsBytes) }
+                }
+                continue
+            }
+            if (index < 0) continue // INFO_TRY_AGAIN_LATER / buffers changed
 
             try {
-                val buffer = c.getOutputBuffer(index)
-                if (buffer != null && info.size > 0) {
-                    val data = ByteArray(info.size)
-                    buffer.position(info.offset)
-                    buffer.get(data, 0, info.size)
+                var payload: ByteArray? = null
+                var isConfig = false
+                var rtpTimestamp = 0L
 
-                    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                        synchronized(rtpLock) { packetizer.cacheParameterSets(data) }
+                try {
+                    val buffer = c.getOutputBuffer(index)
+                    if (buffer != null && info.size > 0) {
+                        val data = ByteArray(info.size)
+                        buffer.position(info.offset)
+                        buffer.get(data, 0, info.size)
+                        payload = data
+                        isConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0)
+                        rtpTimestamp = info.presentationTimeUs * 90 / 1000
+                    }
+                } finally {
+                    c.releaseOutputBuffer(index, false)
+                }
+
+                if (payload != null) {
+                    if (isConfig) {
+                        synchronized(rtpLock) { packetizer.cacheParameterSets(payload) }
                     } else {
-                        val rtpTimestamp = info.presentationTimeUs * 90 / 1000
-                        val packets = packetizeAccessUnit(data, rtpTimestamp)
+                        val packets = packetizeAccessUnit(payload, rtpTimestamp)
                         try {
                             sender.send(packets)
                         } catch (_: Throwable) {
@@ -355,7 +383,6 @@ class VideoEncoder(
                         }
                     }
                 }
-                c.releaseOutputBuffer(index, false)
             } catch (t: Throwable) {
                 if (running) {
                     running = false

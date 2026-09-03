@@ -33,6 +33,42 @@ object FrameConverter {
      * buffer's position is left untouched.
      */
     @Suppress("LongParameterList")
+    fun copyPlaneInto(
+        src: ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int,
+        srcRowOffset: Int,
+        srcColOffset: Int,
+        dst: ByteArray,
+        dstStride: Int,
+        dstRowOffset: Int = 0,
+        dstColOffset: Int = 0,
+    ) {
+        val base = src.position()
+        for (row in 0 until height) {
+            val rowStart = (row + srcRowOffset) * rowStride
+            var dstPos = (row + dstRowOffset) * dstStride + dstColOffset
+            if (pixelStride == 1) {
+                for (col in 0 until width) {
+                    dst[dstPos++] = src.get(base + rowStart + srcColOffset + col)
+                }
+            } else {
+                for (col in 0 until width) {
+                    dst[dstPos++] = src.get(base + rowStart + (srcColOffset + col) * pixelStride)
+                }
+            }
+        }
+    }
+
+    /**
+     * Copy one plane into a tightly-packed `width*height` array, honouring `rowStride`
+     * (padding at the end of each row) and `pixelStride` (1 for planar, 2 for the
+     * interleaved chroma that many devices produce). Uses absolute gets offset by `src.position()`
+     * so the source buffer's position is left untouched while respecting slice offsets.
+     */
+    @Suppress("LongParameterList")
     fun copyPlane(
         src: ByteBuffer,
         width: Int,
@@ -43,19 +79,10 @@ object FrameConverter {
         colOffset: Int = 0,
     ): ByteArray {
         val out = ByteArray(width * height)
-        var outPos = 0
-        for (row in 0 until height) {
-            val rowStart = (row + rowOffset) * rowStride
-            if (pixelStride == 1) {
-                for (col in 0 until width) {
-                    out[outPos++] = src.get(rowStart + colOffset + col)
-                }
-            } else {
-                for (col in 0 until width) {
-                    out[outPos++] = src.get(rowStart + (colOffset + col) * pixelStride)
-                }
-            }
-        }
+        copyPlaneInto(
+            src, width, height, rowStride, pixelStride,
+            rowOffset, colOffset, out, width, 0, 0,
+        )
         return out
     }
 
@@ -67,8 +94,8 @@ object FrameConverter {
      * the frame is center-cropped to exactly that size — cameras often negotiate a wider
      * stream (e.g. 1600x720 on 20:9 sensors) than the encoder was configured for, and
      * feeding oversized planes into the codec input image overflows its buffers. Offsets
-     * are kept even so the chroma planes stay aligned. A source smaller than the target in
-     * either dimension is an error: cropping cannot invent pixels.
+     * are kept even so the chroma planes stay aligned. When a source frame is smaller than
+     * the target, it is centered on a black canvas (pillarbox/letterbox) to avoid crashing.
      */
     @Suppress("LongParameterList")
     fun toFrameData(
@@ -89,20 +116,38 @@ object FrameConverter {
     ): FrameData {
         val outWidth = if (targetWidth > 0) targetWidth else width
         val outHeight = if (targetHeight > 0) targetHeight else height
-        require(width >= outWidth && height >= outHeight) {
-            "camera frame ${width}x$height is smaller than encoder target ${outWidth}x$outHeight"
-        }
-        val top = ((height - outHeight) / 2) and 1.inv()
-        val left = ((width - outWidth) / 2) and 1.inv()
+        val cropW = minOf(width, outWidth) and 1.inv()
+        val cropH = minOf(height, outHeight) and 1.inv()
+        val srcTop = ((height - cropH) / 2) and 1.inv()
+        val srcLeft = ((width - cropW) / 2) and 1.inv()
+        val dstTop = ((outHeight - cropH) / 2) and 1.inv()
+        val dstLeft = ((outWidth - cropW) / 2) and 1.inv()
 
+        val y = ByteArray(outWidth * outHeight).also { it.fill(16.toByte()) }
         val chromaWidth = outWidth / 2
         val chromaHeight = outHeight / 2
+        val u = ByteArray(chromaWidth * chromaHeight).also { it.fill(128.toByte()) }
+        val v = ByteArray(chromaWidth * chromaHeight).also { it.fill(128.toByte()) }
+
+        copyPlaneInto(
+            yBuffer, cropW, cropH, yRowStride, yPixelStride,
+            srcTop, srcLeft, y, outWidth, dstTop, dstLeft,
+        )
+        copyPlaneInto(
+            uBuffer, cropW / 2, cropH / 2, uRowStride, uPixelStride,
+            srcTop / 2, srcLeft / 2, u, chromaWidth, dstTop / 2, dstLeft / 2,
+        )
+        copyPlaneInto(
+            vBuffer, cropW / 2, cropH / 2, vRowStride, vPixelStride,
+            srcTop / 2, srcLeft / 2, v, chromaWidth, dstTop / 2, dstLeft / 2,
+        )
+
         return FrameData(
             width = outWidth,
             height = outHeight,
-            y = copyPlane(yBuffer, outWidth, outHeight, yRowStride, yPixelStride, top, left),
-            u = copyPlane(uBuffer, chromaWidth, chromaHeight, uRowStride, uPixelStride, top / 2, left / 2),
-            v = copyPlane(vBuffer, chromaWidth, chromaHeight, vRowStride, vPixelStride, top / 2, left / 2),
+            y = y,
+            u = u,
+            v = v,
             timestampUs = timestampUs,
         )
     }
