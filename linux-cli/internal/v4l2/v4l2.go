@@ -125,8 +125,11 @@ func ExclusiveCapsForDevice(videoNr, exclusiveCaps string, n int) (enabled, foun
 			break
 		}
 	}
-	if idx < 0 || idx >= len(caps) {
+	if idx < 0 {
 		return false, false
+	}
+	if idx >= len(caps) {
+		return false, true
 	}
 	return exclusiveCapsTruthy(caps[idx]), true
 }

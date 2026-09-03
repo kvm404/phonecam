@@ -208,6 +208,13 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 	ticker := time.NewTicker(retryInterval)
 	defer ticker.Stop()
 
+	drainChild := func(ch <-chan error) {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+		}
+	}
+
 	var lastReadbackErr error
 	for {
 		lastReadbackErr = r.attemptReadback(ctx, config)
@@ -225,13 +232,23 @@ func (r Runtime) Run(ctx context.Context, config Config, stdout io.Writer) error
 
 		select {
 		case <-ctx.Done():
+			recvCancel()
+			sendCancel()
+			drainChild(recvErr)
+			drainChild(sendErr)
 			return r.timeoutError(ctx, config.Timeout, lastReadbackErr)
 		case e := <-recvErr:
+			recvCancel()
+			sendCancel()
+			drainChild(sendErr)
 			if ctx.Err() != nil {
 				return r.timeoutError(ctx, config.Timeout, lastReadbackErr)
 			}
 			return exitError("receiver", e)
 		case e := <-sendErr:
+			recvCancel()
+			sendCancel()
+			drainChild(recvErr)
 			if ctx.Err() != nil {
 				return r.timeoutError(ctx, config.Timeout, lastReadbackErr)
 			}

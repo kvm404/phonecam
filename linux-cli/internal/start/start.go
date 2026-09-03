@@ -374,7 +374,6 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 
 	answerCh := make(chan string, 1)
 	var promptHandled bool
-	var autoApprovedHere bool
 
 	for !pairSession.IsApproved() {
 		// When the phone first consumes its token it becomes a pending phone
@@ -383,16 +382,7 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 			if phone, ok := pairSession.PendingPhone(); ok {
 				promptHandled = true
 				if config.AutoApprove {
-					if err := pairSession.Approve(time.Now().UTC()); err != nil {
-						fmt.Fprintln(stdout, err)
-						shutdownServer()
-						pairSession.Invalidate()
-						return err
-					}
-					// Persist lives in control.Server after Approve; do not
-					// Upsert here or a later handlePair persist would rotate.
-					fmt.Fprintf(stdout, "Auto-approved phone %q.\n", phone.Name)
-					autoApprovedHere = true
+					// control.Server handles auto-approval and attaches the trust secret.
 					continue
 				}
 				fmt.Fprintf(stdout, "Phone %q wants to connect. Approve? [y/N] ", phone.Name)
@@ -439,14 +429,14 @@ func (r Runtime) Run(ctx context.Context, config Config, stdin io.Reader, stdout
 		case <-ticker.C:
 			// External approval via HTTP /approve while the prompt is pending.
 			// The prompt line has no trailing newline, so lead with one.
-			if pairSession.IsApproved() {
+			if !config.AutoApprove && pairSession.IsApproved() {
 				fmt.Fprintf(stdout, "\nApproved via control API.\n")
 			}
 		}
 	}
 
 	// handlePair AutoApprove approves before PendingPhone is observed here.
-	if config.AutoApprove && !autoApprovedHere {
+	if config.AutoApprove {
 		fmt.Fprintf(stdout, "Auto-approved phone %q.\n", pairSession.ApprovedPhone().Name)
 	}
 
@@ -504,17 +494,21 @@ func (r Runtime) superviseReceiver(
 		select {
 		case <-ctx.Done():
 			attemptCancel()
+			waitReceiverExit(receiverErr)
 			return stop(true, ctx.Err())
 		case err := <-errCh:
 			attemptCancel()
+			waitReceiverExit(receiverErr)
 			return stop(false, err)
 		case err := <-gateErr:
 			attemptCancel()
+			waitReceiverExit(receiverErr)
 			return stop(true, gateRunError(ctx, err))
 		case <-media.restart:
 			attemptCancel()
-			if err := waitReceiverExit(ctx, receiverErr); err != nil {
-				return stop(true, err)
+			waitReceiverExit(receiverErr)
+			if ctx.Err() != nil {
+				return stop(true, ctx.Err())
 			}
 			// A signal that arrived while gst-launch was dying already has
 			// its profile in pending; do not kill the launch we are about to start.
@@ -598,12 +592,12 @@ func waitBackoff(ctx context.Context, delay time.Duration, errCh, gateErr <-chan
 	}
 }
 
-func waitReceiverExit(ctx context.Context, receiverErr <-chan error) error {
+func waitReceiverExit(receiverErr <-chan error) {
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	select {
 	case <-receiverErr:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-waitCtx.Done():
 	}
 }
 

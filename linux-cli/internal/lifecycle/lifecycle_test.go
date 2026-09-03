@@ -375,6 +375,47 @@ func TestProbeControlUnreachableIsStale(t *testing.T) {
 	}
 }
 
+func TestProbeControlTimeoutDoesNotRemoveSession(t *testing.T) {
+	store := &fakeStore{record: session.Record{PID: 1234, ControlPort: 1, SessionID: "s1"}}
+	process := &fakeProcess{}
+	m := newTestManager(store, process, errDoer{errors.New("i/o timeout")})
+
+	var stdout, stderr bytes.Buffer
+	if code := m.Status(&stdout, &stderr); code != 0 {
+		t.Fatalf("expected exit 0 on timeout, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "PhoneCam is running (unresponsive to control probe).") {
+		t.Fatalf("unexpected output: %q", stdout.String())
+	}
+	if store.removed != 0 {
+		t.Fatalf("expected session file not removed on timeout, got %d", store.removed)
+	}
+}
+
+func TestStopProbeTimeoutStillSendsSignal(t *testing.T) {
+	store := &fakeStore{record: session.Record{PID: 1234, ControlPort: 1, SessionID: "s1"}}
+	process := &fakeProcess{
+		aliveFunc: func(call int) error {
+			if call > 1 {
+				return syscall.ESRCH
+			}
+			return nil
+		},
+	}
+	m := newTestManager(store, process, errDoer{errors.New("request deadline exceeded")})
+
+	var stdout, stderr bytes.Buffer
+	if code := m.Stop(&stdout, &stderr); code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if !process.sentSignal(syscall.SIGTERM) {
+		t.Fatal("expected SIGTERM sent to unresponsive process")
+	}
+	if store.removed != 1 {
+		t.Fatalf("expected session file cleaned up after process stopped, got %d", store.removed)
+	}
+}
+
 type errDoer struct{ err error }
 
 func (d errDoer) Do(*http.Request) (*http.Response, error) { return nil, d.err }
