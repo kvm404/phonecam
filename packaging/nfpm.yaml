@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/schema.json
+# Content and script paths are relative to the repository root (workflow cwd).
+name: phonecam
+arch: ${GOARCH}
+platform: linux
+version: ${VERSION}
+version_schema: semver
+release: "1"
+section: video
+priority: optional
+maintainer: Kumar Vaibhav <59643083+kvm404@users.noreply.github.com>
+description: Use an Android phone as a Linux webcam over LAN
+homepage: https://github.com/kvm404/phonecam
+license: MIT
+contents:
+  - src: linux-cli/phonecam-linux-${GOARCH}
+    dst: /usr/bin/phonecam
+    expand: true
+    file_info:
+      mode: 0755
+  - src: LICENSE
+    dst: /usr/share/doc/phonecam/LICENSE
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/licenses/phonecam/LICENSE
+    packager: rpm
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/licenses/phonecam/LICENSE
+    packager: archlinux
+    file_info:
+      mode: 0644
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+archlinux:
+  packager: Kumar Vaibhav <59643083+kvm404@users.noreply.github.com>
+overrides:
+  deb:
+    depends:
+      - gstreamer1.0-tools
+      - gstreamer1.0-plugins-base
+      - gstreamer1.0-plugins-good
+      - gstreamer1.0-plugins-bad
+      - gstreamer1.0-libav
+      - v4l2loopback-dkms
+  rpm:
+    depends:
+      - gstreamer1
+      - gstreamer1-plugins-base
+      - gstreamer1-plugins-good
+      - gstreamer1-plugins-bad-free
+      - gstreamer1-plugin-libav
+      - v4l2loopback
+  archlinux:
+    depends:
+      - gstreamer
+      - gst-plugins-base
+      - gst-plugins-good
+      - gst-plugins-bad
+      - gst-libav
+      - v4l2loopback-dkms

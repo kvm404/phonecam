@@ -1,0 +1,35 @@
+# Maintainer: Kumar Vaibhav <59643083+kvm404@users.noreply.github.com>
+# AUR-ready phonecam-bin. This repository does not push to aur.archlinux.org.
+# Refresh pkgver and sha256sums from the GitHub release SHA256SUMS on each tag.
+
+pkgname=phonecam-bin
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="Use an Android phone as a Linux webcam over LAN"
+arch=('x86_64' 'aarch64')
+url="https://github.com/kvm404/phonecam"
+license=('MIT')
+depends=(
+  'gstreamer'
+  'gst-plugins-base'
+  'gst-plugins-good'
+  'gst-plugins-bad'
+  'gst-libav'
+  'v4l2loopback-dkms'
+)
+provides=('phonecam')
+conflicts=('phonecam')
+source_x86_64=("phonecam-linux-amd64::https://github.com/kvm404/phonecam/releases/download/v${pkgver}/phonecam-linux-amd64")
+source_aarch64=("phonecam-linux-arm64::https://github.com/kvm404/phonecam/releases/download/v${pkgver}/phonecam-linux-arm64")
+# Placeholders: copy phonecam-linux-amd64 / phonecam-linux-arm64 hashes from the
+# matching GitHub release SHA256SUMS before publishing an AUR update.
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  local _bin=phonecam-linux-amd64
+  if [[ "$CARCH" == aarch64 ]]; then
+    _bin=phonecam-linux-arm64
+  fi
+  install -Dm755 "${srcdir}/${_bin}" "${pkgdir}/usr/bin/phonecam"
+}
