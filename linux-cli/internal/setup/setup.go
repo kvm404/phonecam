@@ -276,7 +276,7 @@ func packagePlan(sys System, family, uname string) (pkgs []string, pre [][]strin
 	case "fedora":
 		pkgs = []string{
 			"gstreamer1", "gstreamer1-plugins-base", "gstreamer1-plugins-good",
-			"gstreamer1-plugins-bad-free", "gstreamer1-plugin-libav", "v4l2loopback",
+			"gstreamer1-plugins-bad-free", "gstreamer1-plugin-libav", "akmod-v4l2loopback",
 		}
 		install = append([]string{"dnf", "install", "-y"}, pkgs...)
 		if !sys.Exists("/etc/yum.repos.d/rpmfusion-free.repo") {

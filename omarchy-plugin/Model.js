@@ -152,7 +152,11 @@ function parseStatus(raw) {
 }
 
 function parsePairing(raw) {
-  return parseJsonObject(raw)
+  var obj = parseJsonObject(raw)
+  if (!obj || typeof obj !== "object") return null
+  if (obj.error) return null
+  if (!obj.v || !obj.control || !obj.rtp || !obj.session || !obj.token || !obj.expires) return null
+  return obj
 }
 
 function publicPairing(pairing) {
@@ -248,7 +252,7 @@ function loopbackUrl(port, path) {
 }
 
 function curlArgs(method, url) {
-  var args = ["curl", "-sS", "--max-time", "2"]
+  var args = ["curl", "-sSf", "--max-time", "2"]
   if (method && method !== "GET") args.push("-X", method)
   args.push(url)
   return args
