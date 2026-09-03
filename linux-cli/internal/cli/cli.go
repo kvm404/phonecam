@@ -23,7 +23,7 @@ import (
 	"github.com/kvm404/phonecam/linux-cli/internal/trust"
 )
 
-var version = "0.2.0"
+var version = "0.3.1"
 
 const writeAccess = 2
 
