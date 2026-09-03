@@ -1,6 +1,6 @@
 # PhoneCam Linux Roadmap
 
-**v0.3.1 is the current release.** Shipped slices below are history. There
+**v0.3.2 is the current release.** Shipped slices below are history. There
 are no roadmap buckets — no v0.4, v1.0, or Later. USB, audio, tray, systemd,
 and torch stay cancelled. Distro packages are no longer cancelled: GitHub
 release `.deb` / `.rpm` / Arch `.pkg.tar.zst` is the first packaging cut.
@@ -8,6 +8,12 @@ release `.deb` / `.rpm` / Arch `.pkg.tar.zst` is the first packaging cut.
 ## Current
 
 Omarchy bar plugin (`omarchy-plugin/`, id `io.github.kvm404.phonecam`): start/stop, pairing QR, status, doctor, trust. Wraps the v0.2 CLI. Not USB, audio, tray, or systemd.
+
+## v0.3.2: Stability Rollup
+
+- Encoder/lifecycle, pairing leave and revoke, gst/smoke reaping, desktop curl/QR, Fedora `akmod-v4l2loopback`.
+- `POST /leave` is authenticated (paired phone, QR token, resume/pairing secret, or loopback).
+- Android APK is 0.3.2 (versionCode 5).
 
 ## v0.3.1: Setup And Distro Packages
 

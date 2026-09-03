@@ -72,17 +72,17 @@ phonecam start      # on the laptop — shows a QR code
 
 ## Status
 
-**v0.3.1.** Working Wi-Fi webcam with QR pairing, trusted reconnect, and
+**v0.3.2.** Working Wi-Fi webcam with QR pairing, trusted reconnect, and
 in-session recovery. v0.3.0 adds camera zoom controls on the LIVE screen
 (+ / − / 1x in 0.25x steps, clamped to the lens' real range) and an
-always-visible viewfinder — the hide-preview toggle is gone. v0.3.1 adds
-`sudo phonecam setup` and GitHub `.deb` / `.rpm` / `.pkg.tar.zst`. The
-Android app is still the v0.3.0 APK. Verified on
-Arch Linux + vivo, and Fedora KDE aarch64 +
-OBS coexistence + Motorola Edge 60 Fusion. Other distros and phones are still
-welcome. Video only (no audio), and the LAN stream is **unencrypted**,
-so use it on trusted networks only. There is no account, cloud, or relay —
-video goes straight from phone to laptop.
+always-visible viewfinder. v0.3.1 adds `sudo phonecam setup` and GitHub
+`.deb` / `.rpm` / `.pkg.tar.zst`. v0.3.2 is a stability rollup (encoder
+lifecycle, pairing leave/revoke, gst reaping) plus an updated Android APK.
+Verified on Arch Linux + vivo, and Fedora KDE aarch64 + OBS coexistence +
+Motorola Edge 60 Fusion. Other distros and phones are still welcome. Video
+only (no audio), and the LAN stream is **unencrypted**, so use it on trusted
+networks only. There is no account, cloud, or relay — video goes straight
+from phone to laptop.
 
 ## Docs & License
 
