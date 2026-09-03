@@ -1,14 +1,18 @@
 # PhoneCam Linux Roadmap
 
-**v0.2.0 is the product.** Shipped slices below are history. There is no v0.3,
-v1.0, or Later bucket. USB, audio, tray, systemd, torch, distro packages, and
+**v0.3.0 is the current release.** Shipped slices below are history. There
+are no roadmap buckets — no v0.4, v1.0, or Later. USB, audio, tray, systemd,
+torch, distro packages, and
 the other unscheduled items that used to live here are cancelled — not deferred.
 
 ## Current
 
 Omarchy bar plugin (`omarchy-plugin/`, id `io.github.kvm404.phonecam`): start/stop, pairing QR, status, doctor, trust. Wraps the v0.2 CLI. Not USB, audio, tray, or systemd.
 
-Camera zoom controls on the LIVE screen: 0.25x steps, reset to 1x on stream start and flip, hidden when the lens has no zoom range.
+## v0.3: Zoom And Always-On Preview
+
+- Camera zoom controls on the LIVE screen: 0.25x steps, reset to 1x on stream start and flip, hidden when the lens has no zoom range ([ADR 0002](adr/0002-camera-zoom-controls.md)).
+- The viewfinder is always visible while streaming; the hide-preview toggle and its persisted preference are removed.
 
 ## v0.1: Local Wi-Fi MVP
 
