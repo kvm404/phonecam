@@ -9,24 +9,45 @@ Android camera → H.264 → RTP/UDP over LAN → GStreamer → v4l2loopback →
 
 ## Install
 
-**1. Linux CLI** (needs [Go](https://go.dev/dl/) 1.22+):
+**1. Linux CLI** — download a `.deb`, `.rpm`, or `.pkg.tar.zst` from
+[Releases](https://github.com/kvm404/phonecam/releases) and install it:
+
+```sh
+# Debian / Ubuntu (amd64 example; use *_arm64.deb on aarch64)
+sudo apt install ./phonecam_*_amd64.deb
+
+# Fedora: enable RPM Fusion free first. v4l2loopback and
+# gstreamer1-plugin-libav are not in stock Fedora, so the RPM Requires
+# will fail until RPM Fusion is enabled.
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+sudo dnf install ./phonecam-*.x86_64.rpm   # or .aarch64.rpm
+
+# Arch
+sudo pacman -U phonecam-*-x86_64.pkg.tar.zst   # or *-aarch64.pkg.tar.zst
+```
+
+Then load the virtual camera. The package only installs `/usr/bin/phonecam`;
+it does not `modprobe` or write loopback options (that would break an existing
+OBS layout):
+
+```sh
+sudo phonecam setup   # installs remaining deps if needed, loads /dev/video10
+phonecam doctor       # verifies everything is ready
+```
+
+`phonecam install` is print-only: it prints package, modprobe, and firewall
+hints without changing the system.
+
+Fallback if you prefer Go (needs [Go](https://go.dev/dl/) 1.22+):
 
 ```sh
 go install github.com/kvm404/phonecam/linux-cli/cmd/phonecam@latest
+sudo phonecam setup
 ```
 
 This puts `phonecam` in `$(go env GOPATH)/bin` — add that to your `PATH` if it
-isn't already. (Prefer not to use Go? Grab a prebuilt binary from
-[Releases](https://github.com/kvm404/phonecam/releases).)
-
-Then install the Linux dependencies (GStreamer, `v4l2loopback`) and check your
-setup:
-
-```sh
-sudo phonecam setup   # installs packages, loads /dev/video10, persists across reboot
-phonecam install      # print-only package / modprobe / firewall hints
-phonecam doctor       # verifies everything is ready
-```
+isn't already. Prebuilt binaries (`phonecam-linux-amd64` / `phonecam-linux-arm64`)
+are on the same [Releases](https://github.com/kvm404/phonecam/releases) page.
 
 **2. Android app:** download the APK from
 [Releases](https://github.com/kvm404/phonecam/releases) and install it (you may

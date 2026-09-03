@@ -20,6 +20,19 @@ jobs:
         with:
           go-version: "1.22"
 
+      - name: Install nFPM
+        env:
+          NFPM_VERSION: "2.43.0"
+          NFPM_TARBALL: "nfpm_2.43.0_Linux_x86_64.tar.gz"
+          NFPM_SHA256: "a80d5f724ed70b192ffa8a2bde469c013cef559c8afa3441eb51dd9a918beb6b"
+        run: |
+          curl -fsSL -o "/tmp/${NFPM_TARBALL}" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${NFPM_TARBALL}"
+          echo "${NFPM_SHA256}  /tmp/${NFPM_TARBALL}" | sha256sum -c -
+          tar -xzf "/tmp/${NFPM_TARBALL}" -C /tmp nfpm
+          sudo install -m 0755 /tmp/nfpm /usr/local/bin/nfpm
+          nfpm --version
+
       - name: Build Linux CLI binaries
         working-directory: linux-cli
         run: |
@@ -33,10 +46,45 @@ jobs:
               ./cmd/phonecam
           done
 
-      - name: Generate checksums
-        working-directory: linux-cli
+      - name: Build distro packages
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          sha256sum phonecam-linux-amd64 phonecam-linux-arm64 > SHA256SUMS
+          export VERSION="${VERSION#v}"
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            export GOARCH="${arch}"
+            case "${arch}" in
+              amd64)
+                rpm_arch=x86_64
+                arch_arch=x86_64
+                ;;
+              arm64)
+                rpm_arch=aarch64
+                arch_arch=aarch64
+                ;;
+            esac
+            nfpm pkg --config packaging/nfpm.yaml --packager deb \
+              --target "dist/phonecam_${VERSION}_${arch}.deb"
+            nfpm pkg --config packaging/nfpm.yaml --packager rpm \
+              --target "dist/phonecam-${VERSION}-1.${rpm_arch}.rpm"
+            nfpm pkg --config packaging/nfpm.yaml --packager archlinux \
+              --target "dist/phonecam-${VERSION}-1-${arch_arch}.pkg.tar.zst"
+          done
+
+      - name: Generate checksums
+        run: |
+          cp linux-cli/phonecam-linux-amd64 linux-cli/phonecam-linux-arm64 dist/
+          (
+            cd dist
+            sha256sum \
+              phonecam-linux-amd64 \
+              phonecam-linux-arm64 \
+              phonecam_*.deb \
+              phonecam-*.rpm \
+              phonecam-*.pkg.tar.zst \
+              > SHA256SUMS
+          )
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -44,6 +92,9 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           files: |
-            linux-cli/phonecam-linux-amd64
-            linux-cli/phonecam-linux-arm64
-            linux-cli/SHA256SUMS
+            dist/phonecam-linux-amd64
+            dist/phonecam-linux-arm64
+            dist/SHA256SUMS
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst

@@ -2,12 +2,14 @@
 
 **v0.3.0 is the current release.** Shipped slices below are history. There
 are no roadmap buckets — no v0.4, v1.0, or Later. USB, audio, tray, systemd,
-torch, distro packages, and
-the other unscheduled items that used to live here are cancelled — not deferred.
+and torch stay cancelled. Distro packages are no longer cancelled: GitHub
+release `.deb` / `.rpm` / Arch `.pkg.tar.zst` is the first packaging cut.
 
 ## Current
 
 Omarchy bar plugin (`omarchy-plugin/`, id `io.github.kvm404.phonecam`): start/stop, pairing QR, status, doctor, trust. Wraps the v0.2 CLI. Not USB, audio, tray, or systemd.
+
+Distro packages: tag workflow attaches `.deb`, `.rpm`, and `.pkg.tar.zst` for amd64 and arm64 (Depends on distro GStreamer plugins + v4l2loopback). Package installs `/usr/bin/phonecam` only; `sudo phonecam setup` loads the loopback. No PPA, COPR, Snap, Flatpak, or v4l2loopback fork. In-repo `packaging/aur/PKGBUILD` is AUR-ready `phonecam-bin` and is not pushed to aur.archlinux.org.
 
 ## v0.3: Zoom And Always-On Preview
 

@@ -12,6 +12,7 @@ build/
 dist/
 out/
 tmp/
+linux-cli/phonecam-linux-*
 
 # Signing secrets
 keystore.properties
