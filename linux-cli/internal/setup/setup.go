@@ -379,57 +379,73 @@ func planLoopback(sys System) (Loopback, error) {
 		return phoneCamOnly, nil
 	}
 
-	nrs := loadedVideoNumbers(sys)
-	if containsInt(nrs, 0) && !containsInt(nrs, 10) {
-		if err := ensureNoHolders(sys, nrs); err != nil {
-			return Loopback{}, err
-		}
-		label0 := deviceLabel(sys, 0)
-		if label0 == "" {
-			label0 = "OBS Virtual Camera"
-		}
-		return Loopback{
-			Kind:  loopbackReloadOBS,
-			Rmmod: true,
-			Args: []string{
-				"devices=2",
-				"video_nr=0,10",
-				"card_label=" + label0 + ",PhoneCam",
-				"exclusive_caps=1,1",
-			},
-			Persist: `options v4l2loopback devices=2 video_nr=0,10 card_label="` + label0 + `,PhoneCam" exclusive_caps=1,1`,
-		}, nil
+	// Module is loaded. A second modprobe is a no-op, including after DKMS
+	// auto-load with empty/default video_nr, so we must rmmod first.
+	nrs := loopbackDeviceNumbers(sys)
+	if len(nrs) > 0 && !containsInt(nrs, 10) {
+		return mergePhoneCam(sys, nrs)
 	}
-
 	if err := ensureNoHolders(sys, nrs); err != nil {
 		return Loopback{}, err
 	}
-	phoneCamOnly.Rmmod = len(nrs) > 0
+	phoneCamOnly.Rmmod = true
 	phoneCamOnly.Kind = loopbackReload
 	return phoneCamOnly, nil
 }
 
-func reloadCurrent(sys System) (Loopback, error) {
-	nrs := loadedVideoNumbers(sys)
+func mergePhoneCam(sys System, nrs []int) (Loopback, error) {
 	if err := ensureNoHolders(sys, nrs); err != nil {
 		return Loopback{}, err
 	}
-	if containsInt(nrs, 0) && containsInt(nrs, 10) {
-		label0 := deviceLabel(sys, 0)
-		if label0 == "" {
-			label0 = "OBS Virtual Camera"
+	labels := make([]string, 0, len(nrs)+1)
+	nrParts := make([]string, 0, len(nrs)+1)
+	capParts := make([]string, 0, len(nrs)+1)
+	for _, n := range nrs {
+		label := deviceLabel(sys, n)
+		if label == "" {
+			if n == 0 {
+				label = "OBS Virtual Camera"
+			} else {
+				label = "Dummy video device"
+			}
 		}
-		return Loopback{
-			Kind:  loopbackReloadOBS,
-			Rmmod: true,
-			Args: []string{
-				"devices=2",
-				"video_nr=0,10",
-				"card_label=" + label0 + ",PhoneCam",
-				"exclusive_caps=1,1",
-			},
-			Persist: `options v4l2loopback devices=2 video_nr=0,10 card_label="` + label0 + `,PhoneCam" exclusive_caps=1,1`,
-		}, nil
+		labels = append(labels, label)
+		nrParts = append(nrParts, strconv.Itoa(n))
+		capParts = append(capParts, "1")
+	}
+	labels = append(labels, v4l2.ExpectedCardLabel)
+	nrParts = append(nrParts, "10")
+	capParts = append(capParts, "1")
+	devices := strconv.Itoa(len(nrParts))
+	videoNr := strings.Join(nrParts, ",")
+	caps := strings.Join(capParts, ",")
+	labelCSV := strings.Join(labels, ",")
+	return Loopback{
+		Kind:  loopbackReloadOBS,
+		Rmmod: true,
+		Args: []string{
+			"devices=" + devices,
+			"video_nr=" + videoNr,
+			"card_label=" + labelCSV,
+			"exclusive_caps=" + caps,
+		},
+		Persist: `options v4l2loopback devices=` + devices + ` video_nr=` + videoNr + ` card_label="` + labelCSV + `" exclusive_caps=` + caps,
+	}, nil
+}
+
+func reloadCurrent(sys System) (Loopback, error) {
+	nrs := loopbackDeviceNumbers(sys)
+	if containsInt(nrs, 10) && len(nrs) > 1 {
+		withoutTen := make([]int, 0, len(nrs)-1)
+		for _, n := range nrs {
+			if n != 10 {
+				withoutTen = append(withoutTen, n)
+			}
+		}
+		return mergePhoneCam(sys, withoutTen)
+	}
+	if err := ensureNoHolders(sys, nrs); err != nil {
+		return Loopback{}, err
 	}
 	return Loopback{
 		Kind:    loopbackReload,
@@ -440,7 +456,7 @@ func reloadCurrent(sys System) (Loopback, error) {
 }
 
 func persistOptions(sys System) string {
-	nrs := loadedVideoNumbers(sys)
+	nrs := loopbackDeviceNumbers(sys)
 	if containsInt(nrs, 0) && containsInt(nrs, 10) {
 		label0 := deviceLabel(sys, 0)
 		if label0 == "" {
@@ -480,6 +496,30 @@ func loadedVideoNumbers(sys System) []int {
 			continue
 		}
 		nrs = append(nrs, v)
+	}
+	return nrs
+}
+
+// loopbackDeviceNumbers returns live v4l2loopback node indexes. Default
+// modprobe leaves video_nr as -1 slots and auto-assigns /dev/videoN; those
+// nodes show up under /sys/devices/virtual/video4linux/.
+func loopbackDeviceNumbers(sys System) []int {
+	seen := map[int]bool{}
+	var nrs []int
+	add := func(n int) {
+		if n < 0 || seen[n] {
+			return
+		}
+		seen[n] = true
+		nrs = append(nrs, n)
+	}
+	for _, n := range loadedVideoNumbers(sys) {
+		add(n)
+	}
+	for n := 0; n < 64; n++ {
+		if sys.Exists("/sys/devices/virtual/video4linux/video" + strconv.Itoa(n)) {
+			add(n)
+		}
 	}
 	return nrs
 }
@@ -569,8 +609,7 @@ func userInGroup(sys System, user, group string) bool {
 
 func firewallPlan(sys System) [][]string {
 	if sys.Run("systemctl", "is-active", "--quiet", "ufw") == nil {
-		out, err := sys.Output("ufw", "status")
-		if err == nil && doctor.UFWStatusAllowsPhoneCam(string(out)) {
+		if ufwAlreadyAllows(sys) {
 			return nil
 		}
 		return [][]string{
@@ -590,6 +629,23 @@ func firewallPlan(sys System) [][]string {
 		}
 	}
 	return nil
+}
+
+func ufwAlreadyAllows(sys System) bool {
+	out, err := sys.Output("ufw", "status")
+	if err == nil && doctor.UFWStatusAllowsPhoneCam(string(out)) {
+		return true
+	}
+	for _, path := range []string{"/etc/ufw/user.rules", "/etc/ufw/user6.rules"} {
+		data, err := sys.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if doctor.UFWRulesAllowPhoneCam(string(data)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Lines is the human-readable dry-run / log form of the plan.
@@ -667,6 +723,20 @@ func Apply(sys System, plan Plan, stdout io.Writer) error {
 			return fmt.Errorf("add %s to group %s: %w", plan.GroupUser, videoGroup, err)
 		}
 		fmt.Fprintf(stdout, "Added %s to group %s; log out and back in before phonecam start.\n", plan.GroupUser, videoGroup)
+	}
+
+	// DKMS/package install may have auto-loaded v4l2loopback with default
+	// options after the original plan was built. Re-read current state so
+	// we rmmod+reload instead of a no-op modprobe that never creates video10.
+	if plan.Loopback.Kind != loopbackLeave {
+		loop, err := planLoopback(sys)
+		if err != nil {
+			return err
+		}
+		plan.Loopback = loop
+		if loop.Persist != "" {
+			plan.ModprobeBody = loop.Persist + "\n"
+		}
 	}
 
 	if plan.Loopback.Rmmod {

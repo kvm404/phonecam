@@ -503,10 +503,21 @@ func appVisibilityGuidanceCheck() Check {
 
 func ufwAllowsPhoneCam(sys System) bool {
 	out, err := sys.CommandOutput("ufw", "status")
-	if err != nil {
-		return false
+	if err == nil && UFWStatusAllowsPhoneCam(string(out)) {
+		return true
 	}
-	return UFWStatusAllowsPhoneCam(string(out))
+	// `ufw status` typically needs root. Non-root doctor still has the
+	// persisted rule files, which match firewalld's already-allows path.
+	for _, path := range []string{"/etc/ufw/user.rules", "/etc/ufw/user6.rules"} {
+		data, err := sys.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if UFWRulesAllowPhoneCam(string(data)) {
+			return true
+		}
+	}
+	return false
 }
 
 // UFWStatusAllowsPhoneCam reports whether `ufw status` already allows the
@@ -528,6 +539,30 @@ func UFWStatusAllowsPhoneCam(status string) bool {
 			tcp = true
 		}
 		if strings.Contains(lower, "47471/udp") {
+			udp = true
+		}
+	}
+	return tcp && udp
+}
+
+// UFWRulesAllowPhoneCam reports whether ufw's persisted user.rules already
+// accept PhoneCam control (TCP 47470) and RTP (UDP 47471). Used when `ufw
+// status` is unreadable without root.
+func UFWRulesAllowPhoneCam(rules string) bool {
+	tcp, udp := false, false
+	for _, line := range strings.Split(rules, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if lower == "" || strings.HasPrefix(lower, "#") {
+			continue
+		}
+		accept := strings.Contains(lower, "-j accept") || strings.Contains(lower, " allow ")
+		if !accept {
+			continue
+		}
+		if strings.Contains(lower, "47470") && strings.Contains(lower, "tcp") {
+			tcp = true
+		}
+		if strings.Contains(lower, "47471") && strings.Contains(lower, "udp") {
 			udp = true
 		}
 	}

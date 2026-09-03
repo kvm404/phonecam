@@ -391,6 +391,30 @@ To                         Action      From
 	}
 }
 
+func TestFirewallCheckInfoWhenUFWRulesFileAllows(t *testing.T) {
+	report := Run(readySystem(fakeSystem{
+		commandFailures: map[string]bool{
+			"ufw status": true,
+		},
+		files: map[string]string{
+			"/etc/ufw/user.rules": `
+-A ufw-user-input -p tcp --dport 47470 -j ACCEPT
+-A ufw-user-input -p udp --dport 47471 -j ACCEPT
+`,
+		},
+	}))
+	check := findCheck(t, report, "Firewall")
+	if check.Status != StatusInfo {
+		t.Fatalf("expected INFO when user.rules already allow PhoneCam ports, got %s (%s)", check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "already allows PhoneCam ports") {
+		t.Fatalf("expected already-allows message, got %q", check.Message)
+	}
+	if check.Fix != "" {
+		t.Fatalf("expected no firewall fix when ports are already allowed, got %q", check.Fix)
+	}
+}
+
 func TestUFWStatusAllowsPhoneCam(t *testing.T) {
 	if UFWStatusAllowsPhoneCam("") {
 		t.Fatal("empty status must not look allowed")
@@ -405,6 +429,19 @@ func TestUFWStatusAllowsPhoneCam(t *testing.T) {
 	tcpOnly := "47470/tcp ALLOW Anywhere\n"
 	if UFWStatusAllowsPhoneCam(tcpOnly) {
 		t.Fatal("tcp-only must not count as allowed")
+	}
+}
+
+func TestUFWRulesAllowPhoneCam(t *testing.T) {
+	rules := `
+-A ufw-user-input -p tcp --dport 47470 -j ACCEPT
+-A ufw-user-input -p udp --dport 47471 -j ACCEPT
+`
+	if !UFWRulesAllowPhoneCam(rules) {
+		t.Fatal("expected user.rules ACCEPT lines to count as allowed")
+	}
+	if UFWRulesAllowPhoneCam("-A ufw-user-input -p tcp --dport 47470 -j ACCEPT\n") {
+		t.Fatal("tcp-only user.rules must not count as allowed")
 	}
 }
 

@@ -20,6 +20,7 @@ type fakeSys struct {
 	outputs  map[string]string
 	openers  map[string][]string
 	openErr  map[string]error
+	afterRun func(name string, args []string)
 
 	ran    [][]string
 	writes map[string]string
@@ -57,6 +58,9 @@ func (f *fakeSys) Exists(path string) bool { return f.exists[path] }
 func (f *fakeSys) Run(name string, args ...string) error {
 	f.ran = append(f.ran, append([]string{name}, args...))
 	key := strings.Join(append([]string{name}, args...), " ")
+	if f.afterRun != nil {
+		f.afterRun(name, args)
+	}
 	if f.failures != nil {
 		if err, ok := f.failures[key]; ok {
 			return err
@@ -254,6 +258,43 @@ func TestLoopbackOBSMergeWithoutPhoneCam(t *testing.T) {
 	}
 }
 
+func TestLoopbackBareModprobeReloadsPhoneCam(t *testing.T) {
+	sys := archBase()
+	sys.exists["/sys/module/v4l2loopback"] = true
+	sys.files[v4l2.VideoNrParameterPath] = "-1,-1,-1,-1\n"
+	plan, err := BuildPlan(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Loopback.Rmmod {
+		t.Fatalf("loaded default module must rmmod before video_nr=10, got %+v", plan.Loopback)
+	}
+	got := strings.Join(plan.Loopback.Args, " ")
+	if got != "video_nr=10 card_label=PhoneCam exclusive_caps=1" {
+		t.Fatalf("args=%q", got)
+	}
+}
+
+func TestLoopbackAutoAssignedVideo0MergesOBS(t *testing.T) {
+	sys := archBase()
+	sys.exists["/sys/module/v4l2loopback"] = true
+	sys.exists["/dev/video0"] = true
+	sys.exists["/sys/devices/virtual/video4linux/video0"] = true
+	sys.files[v4l2.VideoNrParameterPath] = "-1,-1,-1,-1\n"
+	sys.files["/sys/class/video4linux/video0/name"] = "OBS Virtual Camera\n"
+	plan, err := BuildPlan(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Loopback.Kind != loopbackReloadOBS || !plan.Loopback.Rmmod {
+		t.Fatalf("expected OBS merge for auto-assigned video0, got %+v", plan.Loopback)
+	}
+	got := strings.Join(plan.Loopback.Args, " ")
+	if !strings.Contains(got, "devices=2") || !strings.Contains(got, "video_nr=0,10") || !strings.Contains(got, "exclusive_caps=1,1") {
+		t.Fatalf("args=%q", got)
+	}
+}
+
 func TestLoopbackOBSMergeRefusesHolders(t *testing.T) {
 	sys := archBase()
 	sys.exists["/sys/module/v4l2loopback"] = true
@@ -348,6 +389,20 @@ func TestFirewallOnlyWhenBlocking(t *testing.T) {
 	}
 	if len(plan.FirewallCmds) != 0 {
 		t.Fatalf("ufw already allows; got %v", plan.FirewallCmds)
+	}
+
+	sys.outputs["ufw status"] = ""
+	sys.failures["ufw status"] = errors.New("need root")
+	sys.files["/etc/ufw/user.rules"] = `
+-A ufw-user-input -p tcp --dport 47470 -j ACCEPT
+-A ufw-user-input -p udp --dport 47471 -j ACCEPT
+`
+	plan, err = BuildPlan(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.FirewallCmds) != 0 {
+		t.Fatalf("ufw user.rules already allow; got %v", plan.FirewallCmds)
 	}
 
 	sys.failures = map[string]error{
@@ -446,6 +501,43 @@ func TestApplyDoesNotWriteOBSConf(t *testing.T) {
 	}
 	if !sawModprobe || !sawPacman || !sawUsermod {
 		t.Fatalf("missing apply steps: modprobe=%v pacman=%v usermod=%v ran=%v", sawModprobe, sawPacman, sawUsermod, sys.ran)
+	}
+}
+
+func TestApplyReloadsAfterPackageAutoLoad(t *testing.T) {
+	sys := archBase()
+	sys.euid = 0
+	plan, err := BuildPlan(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Loopback.Rmmod {
+		t.Fatal("unloaded module should plan a first load")
+	}
+	sys.afterRun = func(name string, args []string) {
+		if name == "pacman" {
+			sys.exists["/sys/module/v4l2loopback"] = true
+			sys.files[v4l2.VideoNrParameterPath] = "-1,-1,-1,-1\n"
+		}
+	}
+	var out bytes.Buffer
+	if err := Apply(sys, plan, &out); err != nil {
+		t.Fatal(err)
+	}
+	var sawRmmod, sawModprobe bool
+	for _, cmd := range sys.ran {
+		switch cmd[0] {
+		case "rmmod":
+			sawRmmod = true
+		case "modprobe":
+			sawModprobe = true
+			if strings.Join(cmd[1:], " ") != "v4l2loopback video_nr=10 card_label=PhoneCam exclusive_caps=1" {
+				t.Fatalf("modprobe %v", cmd)
+			}
+		}
+	}
+	if !sawRmmod || !sawModprobe {
+		t.Fatalf("package auto-load must rmmod then load PhoneCam, ran=%v", sys.ran)
 	}
 }
 
