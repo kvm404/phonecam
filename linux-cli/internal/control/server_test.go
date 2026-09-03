@@ -901,8 +901,9 @@ func TestStatusOneShotSecretsToApprovedIPOnly(t *testing.T) {
 	}
 
 	second := getStatusFrom(server, "192.168.1.50:40000")
-	if _, ok := mustJSONMap(t, second.Body.Bytes())["resume_token"]; ok {
-		t.Fatal("second /status must not repeat secrets")
+	resume2, _ := mustJSONMap(t, second.Body.Bytes())["resume_token"].(string)
+	if resume2 != resume {
+		t.Fatalf("expected retained resume_token on retry before media, got %v", resume2)
 	}
 }
 
@@ -945,8 +946,9 @@ func TestStatusOneShotIncludesPairingSecretWhenStoreConfigured(t *testing.T) {
 	}
 
 	second := getStatusFrom(server, "192.168.1.50:40000")
-	if _, ok := mustJSONMap(t, second.Body.Bytes())["pairing_secret"]; ok {
-		t.Fatal("second /status must not repeat pairing_secret")
+	body2 := mustJSONMap(t, second.Body.Bytes())
+	if body2["pairing_secret"] != secret {
+		t.Fatalf("expected retained pairing_secret on retry before media, got %v", body2["pairing_secret"])
 	}
 }
 
@@ -1254,5 +1256,296 @@ func TestTrustDeleteLoopbackOnly(t *testing.T) {
 	}
 	if store.Count() != 0 {
 		t.Fatal("loopback delete should revoke")
+	}
+}
+
+func TestTrustDeleteInvalidatesActiveSession(t *testing.T) {
+	session, now := newTestSession(t)
+	store := &memTrust{}
+	if _, err := store.Upsert("phone-1", "Pixel", now); err != nil {
+		t.Fatal(err)
+	}
+	media := &recordingMedia{}
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now},
+		Trust:   store,
+		Media:   media,
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", pairRec.Code)
+	}
+	appRec := postLocalJSON(server, "/approve", approveRequest{SessionID: session.Payload().SessionID})
+	if appRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", appRec.Code)
+	}
+
+	local := httptest.NewRequest(http.MethodDelete, "/trust/phone-1", nil)
+	local.RemoteAddr = "127.0.0.1:9"
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, local)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if session.IsApproved() {
+		t.Fatal("expected session not approved when active trusted phone was deleted")
+	}
+	allow, ok := media.lastAllow()
+	if !ok || len(allow.IP) != 0 || allow.Port != 0 {
+		t.Fatalf("expected media allow reset to empty source, got %#v", allow)
+	}
+}
+
+func TestTrustDeleteInvalidatesPendingSession(t *testing.T) {
+	session, now := newTestSession(t)
+	media := &recordingMedia{}
+	store := &memTrust{}
+	if _, err := store.Upsert("phone-1", "Pixel", now); err != nil {
+		t.Fatal(err)
+	}
+
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now},
+		Media:   media,
+		Trust:   store,
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", pairRec.Code)
+	}
+	if _, ok := session.PendingPhone(); !ok {
+		t.Fatal("expected pending phone before approval")
+	}
+
+	local := httptest.NewRequest(http.MethodDelete, "/trust/phone-1", nil)
+	local.RemoteAddr = "127.0.0.1:9"
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, local)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := session.PendingPhone(); ok {
+		t.Fatal("expected pending phone cleared when trust deleted")
+	}
+}
+
+func TestHandleLeaveResetsPairing(t *testing.T) {
+	session, now := newTestSession(t)
+	media := &recordingMedia{}
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now},
+		Media:   media,
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", pairRec.Code)
+	}
+	appRec := postLocalJSON(server, "/approve", approveRequest{SessionID: session.Payload().SessionID})
+	if appRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", appRec.Code)
+	}
+
+	stranger := postJSONFrom(server, "/leave", map[string]string{}, "10.0.0.9:9")
+	if stranger.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 from stranger, got %d: %s", stranger.Code, stranger.Body.String())
+	}
+	if !session.IsApproved() {
+		t.Fatal("stranger leave must not reset pairing")
+	}
+
+	rec := postJSON(server, "/leave", map[string]string{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from paired IP, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if session.IsApproved() {
+		t.Fatal("expected session not approved after leave")
+	}
+	allow, ok := media.lastAllow()
+	if !ok || allow.IP != nil || allow.Port != 0 {
+		t.Fatalf("expected RTP allow cleared, got ok=%v %+v", ok, allow)
+	}
+}
+
+func TestHandleLeaveAcceptsLoopbackAndQRToken(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now},
+		Media:   &recordingMedia{},
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", pairRec.Code)
+	}
+
+	wrong := postJSONFrom(server, "/leave", map[string]string{
+		"session": session.Payload().SessionID,
+		"token":   "nope",
+	}, "10.0.0.9:9")
+	if wrong.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for bad token, got %d: %s", wrong.Code, wrong.Body.String())
+	}
+	if _, ok := session.PendingPhone(); !ok {
+		t.Fatal("bad token must not clear pending phone")
+	}
+
+	qr := postJSONFrom(server, "/leave", map[string]string{
+		"session": session.Payload().SessionID,
+		"token":   session.Payload().Token,
+	}, "10.0.0.9:9")
+	if qr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for QR token leave, got %d: %s", qr.Code, qr.Body.String())
+	}
+	if _, ok := session.PendingPhone(); ok {
+		t.Fatal("expected pending phone cleared after QR leave")
+	}
+
+	pairRec = postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-2", Name: "Pixel 2"},
+		RTPPort:   50000,
+		SSRC:      99,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on rescan, got %d", pairRec.Code)
+	}
+	local := postLocalJSON(server, "/leave", map[string]string{})
+	if local.Code != http.StatusOK {
+		t.Fatalf("expected 200 for loopback leave, got %d: %s", local.Code, local.Body.String())
+	}
+}
+
+func TestHandleLeaveResumeTokenFromOtherIP(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now},
+		Media:       &recordingMedia{},
+		AutoApprove: true,
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", pairRec.Code)
+	}
+	resume, _ := mustJSONMap(t, pairRec.Body.Bytes())["resume_token"].(string)
+	if resume == "" {
+		t.Fatal("expected resume_token on auto-approve pair")
+	}
+
+	wrong := postJSONFrom(server, "/leave", map[string]string{"resume_token": "nope"}, "10.0.0.9:9")
+	if wrong.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for bad resume, got %d: %s", wrong.Code, wrong.Body.String())
+	}
+	if !session.IsApproved() {
+		t.Fatal("bad resume must not reset pairing")
+	}
+
+	okLeave := postJSONFrom(server, "/leave", map[string]string{"resume_token": resume}, "10.0.0.9:9")
+	if okLeave.Code != http.StatusOK {
+		t.Fatalf("expected 200 for resume leave, got %d: %s", okLeave.Code, okLeave.Body.String())
+	}
+	if session.IsApproved() {
+		t.Fatal("expected session not approved after resume leave")
+	}
+}
+
+func TestStatusSecretsRetainedUntilMediaPackets(t *testing.T) {
+	session, now := newTestSession(t)
+	media := &recordingMedia{}
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now},
+		Media:   media,
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", pairRec.Code)
+	}
+	appRec := postLocalJSON(server, "/approve", approveRequest{SessionID: session.Payload().SessionID})
+	if appRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", appRec.Code)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/status", nil)
+	statusReq.RemoteAddr = "192.168.1.50:9999"
+
+	rec1 := httptest.NewRecorder()
+	server.ServeHTTP(rec1, statusReq)
+	var body1 map[string]any
+	if err := json.Unmarshal(rec1.Body.Bytes(), &body1); err != nil {
+		t.Fatal(err)
+	}
+	if body1["resume_token"] == nil || body1["resume_token"] == "" {
+		t.Fatal("expected resume_token in first status")
+	}
+
+	rec2 := httptest.NewRecorder()
+	server.ServeHTTP(rec2, statusReq)
+	var body2 map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &body2); err != nil {
+		t.Fatal(err)
+	}
+	if body2["resume_token"] != body1["resume_token"] {
+		t.Fatalf("expected same resume_token in second status, got %v", body2["resume_token"])
+	}
+
+	media.mu.Lock()
+	media.stats.Forwarded = 1
+	media.mu.Unlock()
+
+	rec3 := httptest.NewRecorder()
+	server.ServeHTTP(rec3, statusReq)
+	var body3 map[string]any
+	if err := json.Unmarshal(rec3.Body.Bytes(), &body3); err != nil {
+		t.Fatal(err)
+	}
+	if body3["resume_token"] != nil && body3["resume_token"] != "" {
+		t.Fatalf("expected resume_token to be cleared after RTP packets received, got %v", body3["resume_token"])
 	}
 }

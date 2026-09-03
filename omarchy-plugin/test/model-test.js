@@ -102,6 +102,19 @@ test("parsePairing keeps expires; compactJson is not pretty-printed", function()
   assert.strictEqual(Model.publicPairing(pairing).expires, "2026-08-31T12:00:00Z")
 })
 
+test("curlArgs includes -sSf for fail fast", function() {
+  const args = Model.curlArgs("GET", "http://127.0.0.1:47470/status")
+  assert.ok(args.indexOf("-sSf") !== -1)
+})
+
+test("parsePairing rejects error payload and incomplete objects", function() {
+  assert.strictEqual(Model.parsePairing(JSON.stringify({ error: "internal server error" })), null)
+  assert.strictEqual(Model.parsePairing(JSON.stringify({ v: 1, control: "http://1.2.3.4" })), null)
+  assert.strictEqual(Model.parsePairing(JSON.stringify({ v: 1, control: "http://1.2.3.4", rtp: "1.2.3.4:5000", session: "s1" })), null)
+  assert.strictEqual(Model.parsePairing(JSON.stringify({ v: 1, control: "http://1.2.3.4", rtp: "1.2.3.4:5000", session: "s1", token: "tok" })), null)
+  assert.strictEqual(Model.parsePairing("not-json"), null)
+})
+
 test("parseQrMatrix square ok / ragged fail", function() {
   const ok = Model.parseQrMatrix(["010", "101", "010"])
   assert.strictEqual(ok.size, 3)

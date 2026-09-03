@@ -5,10 +5,14 @@
 package lifecycle
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"time"
 
@@ -81,9 +85,10 @@ func NewManager(store Store, process Process, client HTTPDoer) *Manager {
 type state int
 
 const (
-	stateNotRunning state = iota // no session file
-	stateStale                   // session file present but process is gone/unrelated
-	stateAlive                   // process is alive and its control server matches
+	stateNotRunning   state = iota // no session file
+	stateStale                     // session file present but process is gone/unrelated
+	stateAlive                     // process is alive and its control server matches
+	stateUnresponsive              // process is alive but control server probe timed out/failed
 )
 
 type probeResult struct {
@@ -95,9 +100,34 @@ type probeResult struct {
 	trustedCount   int
 }
 
+type probeStatus int
+
+const (
+	probeOK probeStatus = iota
+	probeMismatch
+	probeFailed
+	probeTimeout
+)
+
+func isTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded")
+}
+
 // check performs the shared liveness check. When the process is dead or the
 // control server does not match the recorded session, it removes the stale file
-// and reports stateStale.
+// and reports stateStale. When the process is alive but probe times out, it reports
+// stateUnresponsive without removing the session file.
 func (m *Manager) check() (session.Record, probeResult, state) {
 	record, err := m.store.Read()
 	if err != nil {
@@ -109,8 +139,11 @@ func (m *Manager) check() (session.Record, probeResult, state) {
 		return record, probeResult{}, stateStale
 	}
 
-	probe, ok := m.probeControl(record)
-	if !ok {
+	probe, pStatus := m.probeControl(record)
+	switch pStatus {
+	case probeTimeout:
+		return record, probeResult{}, stateUnresponsive
+	case probeMismatch, probeFailed:
 		_ = m.store.Remove()
 		return record, probeResult{}, stateStale
 	}
@@ -124,21 +157,23 @@ func (m *Manager) alive(pid int) bool {
 }
 
 // probeControl queries the control server's /status and confirms it reports the
-// recorded session id. approved reflects the pairing state; ok is false when the
-// server is unreachable, returns non-200, or reports a different session.
-func (m *Manager) probeControl(record session.Record) (probeResult, bool) {
+// recorded session id.
+func (m *Manager) probeControl(record session.Record) (probeResult, probeStatus) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/status", record.ControlPort)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return probeResult{}, false
+		return probeResult{}, probeFailed
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return probeResult{}, false
+		if isTimeout(err) {
+			return probeResult{}, probeTimeout
+		}
+		return probeResult{}, probeFailed
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return probeResult{}, false
+		return probeResult{}, probeFailed
 	}
 
 	var body struct {
@@ -150,10 +185,10 @@ func (m *Manager) probeControl(record session.Record) (probeResult, bool) {
 		TrustedCount   int     `json:"trusted_count"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return probeResult{}, false
+		return probeResult{}, probeFailed
 	}
 	if body.Session != record.SessionID {
-		return probeResult{}, false
+		return probeResult{}, probeMismatch
 	}
 	probe := probeResult{approved: body.Approved, lastRTPms: body.LastRTPms, trustedCount: body.TrustedCount}
 	if body.LastRTPms != nil {
@@ -167,7 +202,7 @@ func (m *Manager) probeControl(record session.Record) (probeResult, bool) {
 		probe.hasRTP = true
 		probe.packetsFwd = *body.PacketsFwd
 	}
-	return probe, true
+	return probe, probeOK
 }
 
 // Status prints a status block and returns the process exit code.
@@ -180,6 +215,15 @@ func (m *Manager) Status(stdout, stderr io.Writer) int {
 	case stateStale:
 		fmt.Fprintln(stdout, "Removed stale session file. PhoneCam is not running.")
 		return 1
+	case stateUnresponsive:
+		uptime := m.now().Sub(record.StartedAt).Round(time.Second)
+		fmt.Fprintln(stdout, "PhoneCam is running (unresponsive to control probe).")
+		fmt.Fprintf(stdout, "  PID:            %d\n", record.PID)
+		fmt.Fprintf(stdout, "  Uptime:         %s\n", uptime)
+		fmt.Fprintf(stdout, "  Control port:   %d\n", record.ControlPort)
+		fmt.Fprintf(stdout, "  RTP port:       %d\n", record.RTPPort)
+		fmt.Fprintf(stdout, "  Virtual camera: %s\n", record.Device)
+		return 0
 	}
 
 	pairing := "Waiting for phone"

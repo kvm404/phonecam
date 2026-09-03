@@ -234,28 +234,52 @@ class FrameConverterTest {
     }
 
     @Test
-    fun toFrameDataRejectsUndersizedFrames() {
-        val buf = ByteBuffer.wrap(ByteArray(64))
-        try {
-            FrameConverter.toFrameData(
-                width = 4,
-                height = 4,
-                yBuffer = buf,
-                yRowStride = 4,
-                yPixelStride = 1,
-                uBuffer = buf,
-                uRowStride = 2,
-                uPixelStride = 1,
-                vBuffer = buf,
-                vRowStride = 2,
-                vPixelStride = 1,
-                timestampUs = 0L,
-                targetWidth = 8,
-                targetHeight = 8,
-            )
-            org.junit.Assert.fail("expected IllegalArgumentException")
-        } catch (e: IllegalArgumentException) {
-            org.junit.Assert.assertTrue(e.message!!.contains("smaller than encoder target"))
-        }
+    fun toFrameDataCentersUndersizedFrames() {
+        val yBuf = ByteBuffer.wrap(ByteArray(16) { 99.toByte() })
+        val uBuf = ByteBuffer.wrap(ByteArray(4) { 50.toByte() })
+        val vBuf = ByteBuffer.wrap(ByteArray(4) { 60.toByte() })
+        val frame = FrameConverter.toFrameData(
+            width = 4,
+            height = 4,
+            yBuffer = yBuf,
+            yRowStride = 4,
+            yPixelStride = 1,
+            uBuffer = uBuf,
+            uRowStride = 2,
+            uPixelStride = 1,
+            vBuffer = vBuf,
+            vRowStride = 2,
+            vPixelStride = 1,
+            timestampUs = 0L,
+            targetWidth = 8,
+            targetHeight = 8,
+        )
+        assertEquals(8, frame.width)
+        assertEquals(8, frame.height)
+        assertEquals(16.toByte(), frame.y[0]) // top-left border
+        assertEquals(99.toByte(), frame.y[2 * 8 + 2]) // centered source at (row=2, col=2)
+        // 4x4 into 8x8 → dstTop=dstLeft=2, chroma at (1,1) on a 4×4 plane.
+        assertEquals(128.toByte(), frame.u[0])
+        assertEquals(128.toByte(), frame.v[0])
+        assertEquals(50.toByte(), frame.u[1 * 4 + 1])
+        assertEquals(60.toByte(), frame.v[1 * 4 + 1])
+    }
+
+    @Test
+    fun `copyPlane respects src position offset for interleaved chroma`() {
+        val raw = byteArrayOf(
+            10, 20, 11, 21,
+            12, 22, 13, 23,
+        )
+        val uBuf = ByteBuffer.wrap(raw)
+        uBuf.position(0)
+        val vBuf = ByteBuffer.wrap(raw)
+        vBuf.position(1)
+
+        val u = FrameConverter.copyPlane(uBuf, width = 2, height = 2, rowStride = 4, pixelStride = 2)
+        val v = FrameConverter.copyPlane(vBuf, width = 2, height = 2, rowStride = 4, pixelStride = 2)
+
+        assertArrayEquals(byteArrayOf(10, 11, 12, 13), u)
+        assertArrayEquals(byteArrayOf(20, 21, 22, 23), v)
     }
 }

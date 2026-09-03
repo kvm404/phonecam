@@ -19,10 +19,12 @@ depends=(
 )
 provides=('phonecam')
 conflicts=('phonecam')
+source=("LICENSE::https://raw.githubusercontent.com/kvm404/phonecam/v${pkgver}/LICENSE")
 source_x86_64=("phonecam-linux-amd64::https://github.com/kvm404/phonecam/releases/download/v${pkgver}/phonecam-linux-amd64")
 source_aarch64=("phonecam-linux-arm64::https://github.com/kvm404/phonecam/releases/download/v${pkgver}/phonecam-linux-arm64")
 # Placeholders: copy phonecam-linux-amd64 / phonecam-linux-arm64 hashes from the
 # matching GitHub release SHA256SUMS before publishing an AUR update.
+sha256sums=('SKIP')
 sha256sums_x86_64=('SKIP')
 sha256sums_aarch64=('SKIP')
 
@@ -32,4 +34,5 @@ package() {
     _bin=phonecam-linux-arm64
   fi
   install -Dm755 "${srcdir}/${_bin}" "${pkgdir}/usr/bin/phonecam"
+  install -Dm644 "${srcdir}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }

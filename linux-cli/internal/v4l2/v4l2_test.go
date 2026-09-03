@@ -305,7 +305,15 @@ func TestExclusiveCapsForDevice(t *testing.T) {
 			exclusiveCaps: "Y",
 			n:             10,
 			wantEnabled:   false,
-			wantFound:     false,
+			wantFound:     true,
+		},
+		{
+			name:          "exclusive_caps length mismatch defaults to disabled",
+			videoNr:       "0,10",
+			exclusiveCaps: "1",
+			n:             10,
+			wantEnabled:   false,
+			wantFound:     true,
 		},
 		{
 			name:          "unused -1 slots are not a match",

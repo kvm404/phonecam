@@ -106,6 +106,13 @@ type approveRequest struct {
 	SessionID string `json:"session"`
 }
 
+type leaveRequest struct {
+	SessionID     string `json:"session"`
+	Token         string `json:"token"`
+	ResumeToken   string `json:"resume_token"`
+	PairingSecret string `json:"pairing_secret"`
+}
+
 type statusResponse struct {
 	OK               bool                  `json:"ok"`
 	Approved         bool                  `json:"approved"`
@@ -159,6 +166,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /pair", s.handlePair)
 	s.mux.HandleFunc("POST /approve", s.handleApprove)
 	s.mux.HandleFunc("POST /reconnect", s.handleReconnect)
+	s.mux.HandleFunc("POST /leave", s.handleLeave)
 	s.mux.HandleFunc("GET /status", s.handleStatus)
 	s.mux.HandleFunc("GET /trust", s.handleTrustList)
 	s.mux.HandleFunc("DELETE /trust/{id}", s.handleTrustDelete)
@@ -491,7 +499,56 @@ func (s *Server) handleTrustDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not revoke")
 		return
 	}
+	if s.session != nil {
+		approved := s.session.ApprovedPhone()
+		pending, hasPending := s.session.PendingPhone()
+		if (approved.ID == id || approved.Name == id) || (hasPending && (pending.ID == id || pending.Name == id)) {
+			s.session.Invalidate()
+			if s.media != nil {
+				s.media.SetAllow(pairing.RTPSource{})
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request) {
+	if s.session == nil {
+		writeError(w, http.StatusServiceUnavailable, "no active pairing session")
+		return
+	}
+
+	var request leaveRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if request.SessionID != "" && request.SessionID != s.session.Payload().SessionID {
+		writeError(w, http.StatusUnauthorized, "invalid session")
+		return
+	}
+	if !s.leaveAuthorized(r, request) {
+		writeError(w, http.StatusForbidden, "leave is only available to the paired phone or locally")
+		return
+	}
+
+	if s.media != nil {
+		s.media.SetAllow(pairing.RTPSource{})
+	}
+	s.session.ResetPairing()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) leaveAuthorized(r *http.Request, request leaveRequest) bool {
+	if isLoopbackRequest(r.RemoteAddr) {
+		return true
+	}
+	if ip, err := remoteIP(r.RemoteAddr); err == nil {
+		if want, ok := s.session.ControlIP(); ok && want.Equal(ip) {
+			return true
+		}
+	}
+	return s.session.MatchLeaveSecrets(request.SessionID, request.Token, request.ResumeToken, request.PairingSecret)
 }
 
 func (s *Server) pinMedia() {
@@ -521,7 +578,8 @@ func (s *Server) currentCamera() string {
 	return s.camera
 }
 
-// statusSecrets is the --require-approval one-shot. Loopback and AutoApprove
+// statusSecrets delivers credentials in require-approval mode without destroying
+// them until streaming starts from the approved peer. Loopback and AutoApprove
 // never receive standing credentials on GET /status.
 func (s *Server) statusSecrets(r *http.Request) (resume, pairing string) {
 	if s.autoApprove || s.session == nil || isLoopbackRequest(r.RemoteAddr) {
@@ -535,7 +593,13 @@ func (s *Server) statusSecrets(r *http.Request) (resume, pairing string) {
 	if !ok || !approvedIP.Equal(ip) {
 		return "", ""
 	}
-	resume, pairing, ok = s.session.TakeSecrets()
+	if s.media != nil {
+		st := s.media.Stats()
+		if !st.LastPacket.IsZero() || st.Forwarded > 0 {
+			return "", ""
+		}
+	}
+	resume, pairing, ok = s.session.PeekSecrets()
 	if !ok {
 		return "", ""
 	}

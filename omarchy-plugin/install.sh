@@ -14,6 +14,10 @@ if ! command -v omarchy >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v qrencode >/dev/null 2>&1; then
+  echo "install.sh: warning: 'qrencode' not found on PATH; pairing QR codes cannot be rendered" >&2
+fi
+
 omarchy plugin validate "$src"
 
 if [[ $src == "$dest" ]]; then

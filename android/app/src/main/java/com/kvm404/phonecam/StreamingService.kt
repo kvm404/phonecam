@@ -294,6 +294,7 @@ class StreamingService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         if (intent?.action == ACTION_STOP) {
+            startForegroundNotification()
             stopStreaming(error = null)
             return START_NOT_STICKY
         }
@@ -404,6 +405,7 @@ class StreamingService : LifecycleService() {
         if (handoff == null || socket == null) {
             handoff?.rtpIdentity?.close()
             // Nothing to stream (e.g. the session was cleared/closed on Cancel).
+            startForegroundNotification()
             stopStreaming(error = null)
             return
         }
@@ -1027,7 +1029,7 @@ class StreamingService : LifecycleService() {
         manager.createNotificationChannel(channel)
     }
 
-    private fun startForegroundNotification(laptop: String) {
+    private fun startForegroundNotification(laptop: String = "") {
         val notification = buildNotification(laptop)
         // The typed FGS API and the CAMERA type constant are API 30+; on 26–29 the plain
         // startForeground is used (the manifest still declares the camera service type).

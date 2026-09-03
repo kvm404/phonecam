@@ -340,11 +340,14 @@ Item {
     clearLiveState()
     _adopted = false
     sessionRecord = null
-    if (!_intentionalStop && exitCode !== 0) {
-      lastError = Model.concise(_stopError || "phonecam stop failed")
-    } else {
-      lastError = ""
+    _lastQrJson = ""
+    if (exitCode !== 0) {
+      _restartAfterStop = false
+      lastError = Model.concise(_stopError || ("phonecam stop failed (exit code " + exitCode + ")"))
+      phase = resolvedBin === "" ? "missing-binary" : "stopped"
+      return
     }
+    lastError = ""
     phase = resolvedBin === "" ? "missing-binary" : "stopped"
     if (_restartAfterStop) {
       _restartAfterStop = false
@@ -469,7 +472,7 @@ Item {
     stderr: SplitParser {
       onRead: function(line) {
         var value = Model.concise(line)
-        if (value !== "") root._startStderr = value
+        if (value !== "" && root._startStderr === "") root._startStderr = value
       }
     }
     onStarted: {
@@ -547,18 +550,31 @@ Item {
       id: qrStdout
       waitForEnd: true
     }
-    stderr: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector {
+      id: qrStderr
+      waitForEnd: true
+    }
     onStarted: {
       write(root._qrPayload + "\n")
       root._qrPayload = ""
     }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
+        root._lastQrJson = ""
         root.qrRows = []
         root.qrSize = 0
+        var err = qrStderr ? qrStderr.text.trim() : ""
+        root.lastError = Model.concise(err.length > 0 ? err : "qrencode failed or missing")
         return
       }
       var parsed = Model.parseQrOutput(qrStdout.text || "")
+      if (parsed.size === 0) {
+        root._lastQrJson = ""
+        root.qrRows = []
+        root.qrSize = 0
+        root.lastError = "Invalid QR code matrix generated"
+        return
+      }
       root.qrRows = parsed.rows
       root.qrSize = parsed.size
     }

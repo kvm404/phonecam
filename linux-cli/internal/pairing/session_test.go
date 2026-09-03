@@ -418,15 +418,123 @@ func TestPendingPhoneFalseAfterInvalidate(t *testing.T) {
 	}
 }
 
-func TestApprovalRejectsExpiredSessionAfterTokenConsumption(t *testing.T) {
+func TestApprovalSucceedsAfterTokenConsumptionEvenIfTTLElapsed(t *testing.T) {
 	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	session := newTestSession(t, Config{Now: now})
 
 	if err := session.ConsumeToken(tokenRequest(session, session.Payload().Token), now.Add(time.Second)); err != nil {
 		t.Fatalf("expected token consumption to succeed: %v", err)
 	}
-	if err := session.Approve(now.Add(DefaultTTL)); !errors.Is(err, ErrExpired) {
-		t.Fatalf("expected expired approval to fail, got %v", err)
+	if err := session.Approve(now.Add(DefaultTTL)); err != nil {
+		t.Fatalf("expected approval after consumption to succeed even if TTL elapsed, got %v", err)
+	}
+}
+
+func TestControlIPPendingAndApproved(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	if _, ok := session.ControlIP(); ok {
+		t.Fatal("expected no control IP before consume")
+	}
+	req := tokenRequest(session, session.Payload().Token)
+	if err := session.ConsumeToken(req, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ip, ok := session.ControlIP()
+	if !ok || !ip.Equal(req.ControlIP) {
+		t.Fatalf("pending ControlIP=%v ok=%v, want %v", ip, ok, req.ControlIP)
+	}
+	if _, ok := session.ApprovedControlIP(); ok {
+		t.Fatal("ApprovedControlIP must stay empty until approve")
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ip, ok = session.ControlIP()
+	if !ok || !ip.Equal(req.ControlIP) {
+		t.Fatalf("approved ControlIP=%v ok=%v, want %v", ip, ok, req.ControlIP)
+	}
+}
+
+func TestMatchLeaveSecrets(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	payload := session.Payload()
+	if !session.MatchLeaveSecrets(payload.SessionID, payload.Token, "", "") {
+		t.Fatal("QR leave secrets should match even before consume")
+	}
+	if session.MatchLeaveSecrets(payload.SessionID, "nope", "", "") {
+		t.Fatal("wrong token must not match")
+	}
+	req := tokenRequest(session, payload.Token)
+	if err := session.ConsumeToken(req, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	session.SetPairingSecret("pairing-secret")
+	resume := session.ResumeToken()
+	if !session.MatchLeaveSecrets("", "", resume, "") {
+		t.Fatal("expected resume token to authorize leave")
+	}
+	if !session.MatchLeaveSecrets("", "", "", "pairing-secret") {
+		t.Fatal("expected pairing secret to authorize leave")
+	}
+	if session.MatchLeaveSecrets("", "", "other", "other") {
+		t.Fatal("wrong secrets must not match")
+	}
+}
+
+func TestResetPairing(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	req := tokenRequest(session, session.Payload().Token)
+	customVideo := VideoProfile{Width: 1920, Height: 1080, FPS: 60}
+	req.Video = &customVideo
+	if err := session.ConsumeToken(req, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if session.NegotiatedVideo() != customVideo {
+		t.Fatalf("expected custom video before reset, got %v", session.NegotiatedVideo())
+	}
+	session.ResetPairing()
+	if session.IsApproved() {
+		t.Fatal("expected session not approved after reset")
+	}
+	if session.NegotiatedVideo() != session.Payload().Video {
+		t.Fatalf("expected default video after reset, got %v", session.NegotiatedVideo())
+	}
+	diffReq := req
+	diffReq.Video = nil
+	diffReq.Phone = Phone{ID: "phone-new", Name: "New Phone"}
+	if err := session.ConsumeToken(diffReq, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("expected consumption after reset to succeed, got %v", err)
+	}
+}
+
+func TestPeekSecretsDoesNotMarkTaken(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+
+	req := tokenRequest(session, session.Payload().Token)
+	if err := session.ConsumeToken(req, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	r1, p1, ok1 := session.PeekSecrets()
+	if !ok1 || r1 == "" {
+		t.Fatalf("expected secrets from peek, got %v", ok1)
+	}
+	r2, p2, ok2 := session.PeekSecrets()
+	if !ok2 || r1 != r2 || p1 != p2 {
+		t.Fatalf("expected consistent secrets on repeated peek")
 	}
 }
 

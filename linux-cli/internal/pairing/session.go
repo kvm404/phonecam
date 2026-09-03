@@ -226,6 +226,8 @@ func (s *Session) ConsumeToken(request TokenRequest, now time.Time) error {
 		}
 	}
 	s.consumed = true
+	s.approved = false
+	s.secretsTaken = false
 	s.pendingPhone = request.Phone
 	s.pendingSource = RTPSource{
 		IP:   append(net.IP(nil), request.ControlIP...),
@@ -259,9 +261,6 @@ func (s *Session) approve(now time.Time, secret string) error {
 	}
 	if s.approved {
 		return nil
-	}
-	if s.isExpiredLocked(now) {
-		return ErrExpired
 	}
 	if !s.consumed {
 		return ErrInvalidToken
@@ -499,6 +498,34 @@ func (s *Session) TakeSecrets() (resume, pairing string, ok bool) {
 	return s.resumeToken, s.pairingSecret, true
 }
 
+// ResetPairing resets the pairing session so that a new pairing handshake can take place.
+func (s *Session) ResetPairing() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.consumed = false
+	s.approved = false
+	s.secretsTaken = false
+	s.pendingPhone = Phone{}
+	s.pendingSource = RTPSource{}
+	s.approvedPhone = Phone{}
+	s.rtpSource = nil
+	s.negotiated = nil
+	s.resumeToken = ""
+	s.pairingSecret = ""
+}
+
+// PeekSecrets returns resume and pairing secrets without marking them as taken.
+func (s *Session) PeekSecrets() (resume, pairing string, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.approved || s.invalidated || s.resumeToken == "" {
+		return "", "", false
+	}
+	return s.resumeToken, s.pairingSecret, true
+}
+
 // ApprovedControlIP is the HTTP peer that consumed the QR token (or the last
 // rebind). Used for the require-approval one-shot /status delivery.
 func (s *Session) ApprovedControlIP() (net.IP, bool) {
@@ -509,6 +536,42 @@ func (s *Session) ApprovedControlIP() (net.IP, bool) {
 		return nil, false
 	}
 	return append(net.IP(nil), s.pendingSource.IP...), true
+}
+
+// ControlIP is the HTTP peer that consumed the QR token, pending or approved.
+func (s *Session) ControlIP() (net.IP, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.invalidated || (!s.consumed && !s.approved) || s.pendingSource.IP == nil {
+		return nil, false
+	}
+	return append(net.IP(nil), s.pendingSource.IP...), true
+}
+
+// MatchLeaveSecrets reports whether QR token, resume_token, or pairing_secret
+// identifies the current pairing. sessionID must match when a QR token is used.
+func (s *Session) MatchLeaveSecrets(sessionID, token, resume, pairingSecret string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.invalidated {
+		return false
+	}
+	if token != "" && sessionID != "" &&
+		subtle.ConstantTimeCompare([]byte(sessionID), []byte(s.payload.SessionID)) == 1 &&
+		subtle.ConstantTimeCompare([]byte(token), []byte(s.payload.Token)) == 1 {
+		return true
+	}
+	if resume != "" && s.approved && s.resumeToken != "" &&
+		subtle.ConstantTimeCompare([]byte(s.resumeToken), []byte(resume)) == 1 {
+		return true
+	}
+	if pairingSecret != "" && s.pairingSecret != "" &&
+		subtle.ConstantTimeCompare([]byte(s.pairingSecret), []byte(pairingSecret)) == 1 {
+		return true
+	}
+	return false
 }
 
 // ReconnectReady reports that an in-session resume_token exists.

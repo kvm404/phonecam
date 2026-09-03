@@ -53,7 +53,7 @@ overrides:
       - gstreamer1-plugins-good
       - gstreamer1-plugins-bad-free
       - gstreamer1-plugin-libav
-      - v4l2loopback
+      - akmod-v4l2loopback
   archlinux:
     depends:
       - gstreamer

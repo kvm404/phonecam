@@ -593,6 +593,15 @@ class MainActivity : AppCompatActivity() {
 
     /** User-initiated stop of a live session (Leave / Cancel / back on Live), then Home. */
     private fun leaveSession(status: String) {
+        val current = payload ?: StreamingSession.payload
+        if (current != null) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    HttpControlClient().leave(current)
+                } catch (_: Exception) {
+                }
+            }
+        }
         stopStreamingFromUi()
         val stopping = StreamingService.isRunning || bound
         teardownToHome(
@@ -626,7 +635,7 @@ class MainActivity : AppCompatActivity() {
         }
         StreamingSession.clearAndClose()
         if (StreamingService.isRunning || bound) {
-            ContextCompat.startForegroundService(this, StreamingService.stopIntent(this))
+            startService(StreamingService.stopIntent(this))
         }
     }
 
@@ -935,7 +944,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateZoomRow() {
         if (screenState != ScreenState.LIVE) return
         val zoom = if (isStreaming()) streamingService?.currentZoom() else null
-        val show = zoom != null && ZoomStepper.shouldShow(zoom.maxRatio)
+        val show = zoom != null && ZoomStepper.shouldShow(zoom.minRatio, zoom.maxRatio)
         binding.zoomRow.visibility = if (show) View.VISIBLE else View.GONE
         if (zoom == null || !show) return
         binding.zoomReadout.text = ZoomStepper.format(zoom.ratio)
