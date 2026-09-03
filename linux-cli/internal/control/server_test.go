@@ -1369,14 +1369,122 @@ func TestHandleLeaveResetsPairing(t *testing.T) {
 		t.Fatalf("expected 200, got %d", appRec.Code)
 	}
 
-	leaveReq := httptest.NewRequest(http.MethodPost, "/leave", strings.NewReader("{}"))
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, leaveReq)
+	stranger := postJSONFrom(server, "/leave", map[string]string{}, "10.0.0.9:9")
+	if stranger.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 from stranger, got %d: %s", stranger.Code, stranger.Body.String())
+	}
+	if !session.IsApproved() {
+		t.Fatal("stranger leave must not reset pairing")
+	}
+
+	rec := postJSON(server, "/leave", map[string]string{})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 200 from paired IP, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if session.IsApproved() {
 		t.Fatal("expected session not approved after leave")
+	}
+	allow, ok := media.lastAllow()
+	if !ok || allow.IP != nil || allow.Port != 0 {
+		t.Fatalf("expected RTP allow cleared, got ok=%v %+v", ok, allow)
+	}
+}
+
+func TestHandleLeaveAcceptsLoopbackAndQRToken(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session: session,
+		Clock:   fakeClock{now: now},
+		Media:   &recordingMedia{},
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", pairRec.Code)
+	}
+
+	wrong := postJSONFrom(server, "/leave", map[string]string{
+		"session": session.Payload().SessionID,
+		"token":   "nope",
+	}, "10.0.0.9:9")
+	if wrong.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for bad token, got %d: %s", wrong.Code, wrong.Body.String())
+	}
+	if _, ok := session.PendingPhone(); !ok {
+		t.Fatal("bad token must not clear pending phone")
+	}
+
+	qr := postJSONFrom(server, "/leave", map[string]string{
+		"session": session.Payload().SessionID,
+		"token":   session.Payload().Token,
+	}, "10.0.0.9:9")
+	if qr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for QR token leave, got %d: %s", qr.Code, qr.Body.String())
+	}
+	if _, ok := session.PendingPhone(); ok {
+		t.Fatal("expected pending phone cleared after QR leave")
+	}
+
+	pairRec = postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-2", Name: "Pixel 2"},
+		RTPPort:   50000,
+		SSRC:      99,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on rescan, got %d", pairRec.Code)
+	}
+	local := postLocalJSON(server, "/leave", map[string]string{})
+	if local.Code != http.StatusOK {
+		t.Fatalf("expected 200 for loopback leave, got %d: %s", local.Code, local.Body.String())
+	}
+}
+
+func TestHandleLeaveResumeTokenFromOtherIP(t *testing.T) {
+	session, now := newTestSession(t)
+	server := New(Config{
+		Session:     session,
+		Clock:       fakeClock{now: now},
+		Media:       &recordingMedia{},
+		AutoApprove: true,
+	}).Handler()
+
+	pairRec := postJSON(server, "/pair", pairRequest{
+		SessionID: session.Payload().SessionID,
+		Token:     session.Payload().Token,
+		Phone:     pairing.Phone{ID: "phone-1", Name: "Pixel"},
+		RTPPort:   50000,
+		SSRC:      1234,
+	})
+	if pairRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", pairRec.Code)
+	}
+	resume, _ := mustJSONMap(t, pairRec.Body.Bytes())["resume_token"].(string)
+	if resume == "" {
+		t.Fatal("expected resume_token on auto-approve pair")
+	}
+
+	wrong := postJSONFrom(server, "/leave", map[string]string{"resume_token": "nope"}, "10.0.0.9:9")
+	if wrong.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for bad resume, got %d: %s", wrong.Code, wrong.Body.String())
+	}
+	if !session.IsApproved() {
+		t.Fatal("bad resume must not reset pairing")
+	}
+
+	okLeave := postJSONFrom(server, "/leave", map[string]string{"resume_token": resume}, "10.0.0.9:9")
+	if okLeave.Code != http.StatusOK {
+		t.Fatalf("expected 200 for resume leave, got %d: %s", okLeave.Code, okLeave.Body.String())
+	}
+	if session.IsApproved() {
+		t.Fatal("expected session not approved after resume leave")
 	}
 }
 

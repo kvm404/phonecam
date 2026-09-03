@@ -402,4 +402,25 @@ class HttpControlClientTest {
 
         assertTrue(result is ReconnectResult.Failure)
     }
+
+    @Test
+    fun `leave posts session and token`() {
+        var captured: String? = null
+        var method: String? = null
+        var path: String? = null
+        val srv = TestHttpServer { m, p, body ->
+            method = m
+            path = p
+            captured = body
+            200 to """{"ok":true}"""
+        }
+        server = srv
+
+        assertTrue(client(srv).leave(payload))
+        assertEquals("POST", method)
+        assertEquals("/leave", path)
+        val body = JSONObject(requireNotNull(captured))
+        assertEquals(payload.session, body.getString("session"))
+        assertEquals(payload.token, body.getString("token"))
+    }
 }

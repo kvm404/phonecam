@@ -5,6 +5,8 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PairingControllerTest {
@@ -26,6 +28,9 @@ class PairingControllerTest {
     private val rtp = RtpIdentity(ssrc = 123L, sourcePort = 40000)
     private val phone = PhoneIdentity(id = "p1", name = "Pixel")
     private val video = VideoProfile(720, 1280, 30)
+    private val skewExpires = "2020-01-01T00:00:00Z"
+    private val skewExpiresAt = Instant.parse(skewExpires).toEpochMilli()
+    private val skewMs = 120_000L
 
     /** Fake that records calls and returns scripted results. */
     private class FakeControlClient(
@@ -37,6 +42,7 @@ class PairingControllerTest {
         var statusCalls = 0
         var lastVideo: VideoProfile? = null
         var lastCamera: String? = null
+        var onPair: (() -> Unit)? = null
 
         override fun pair(
             payload: PairingPayload,
@@ -49,6 +55,7 @@ class PairingControllerTest {
             pairCalls++
             lastVideo = video
             lastCamera = camera
+            onPair?.invoke()
             return pairResult
         }
 
@@ -160,6 +167,56 @@ class PairingControllerTest {
         assertEquals(PairingController.EXPIRED_MESSAGE, (state as PairingState.Failed).message)
         assertEquals(0, client.pairCalls)
         assertEquals(0, client.statusCalls)
+    }
+
+    @Test
+    fun `payload inside clock skew still pairs`() = runTest {
+        val client = FakeControlClient(
+            pairResult = PairResult.Accepted(approved = true, session = "sess-123"),
+        )
+        val controller = PairingController(
+            client, phone, rtp, video,
+            clock = { skewExpiresAt + skewMs - 1 },
+        )
+
+        controller.run(futurePayload.copy(expires = skewExpires))
+
+        assertTrue(controller.state.value is PairingState.Paired)
+        assertEquals(1, client.pairCalls)
+    }
+
+    @Test
+    fun `payload past clock skew fails without network`() = runTest {
+        val client = FakeControlClient()
+        val controller = PairingController(
+            client, phone, rtp, video,
+            clock = { skewExpiresAt + skewMs },
+        )
+
+        controller.run(futurePayload.copy(expires = skewExpires))
+
+        val state = controller.state.value
+        assertTrue(state is PairingState.Failed)
+        assertEquals(PairingController.EXPIRED_MESSAGE, (state as PairingState.Failed).message)
+        assertEquals(0, client.pairCalls)
+    }
+
+    @Test
+    fun `waiting approval still polls after QR ttl`() = runTest {
+        val now = AtomicLong(skewExpiresAt - 1)
+        val client = FakeControlClient(approveAfter = 2)
+        client.onPair = { now.set(skewExpiresAt + skewMs + 80_000L) }
+        val controller = PairingController(
+            client, phone, rtp, video,
+            clock = { now.get() },
+            pollIntervalMs = 1000L,
+        )
+
+        controller.run(futurePayload.copy(expires = skewExpires))
+
+        assertTrue(controller.state.value is PairingState.Paired)
+        assertEquals(1, client.pairCalls)
+        assertEquals(2, client.statusCalls)
     }
 
     @Test

@@ -219,8 +219,12 @@ class HttpControlClient(
 
     override fun leave(payload: PairingPayload): Boolean {
         val url = "${baseUrl(payload)}/leave"
+        val body = JSONObject()
+            .put("session", payload.session)
+            .put("token", payload.token)
+            .toString()
         return try {
-            val (code, _) = post(url, "{}")
+            val (code, _) = post(url, body)
             code in 200..299
         } catch (_: Exception) {
             false

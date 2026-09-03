@@ -258,6 +258,11 @@ class FrameConverterTest {
         assertEquals(8, frame.height)
         assertEquals(16.toByte(), frame.y[0]) // top-left border
         assertEquals(99.toByte(), frame.y[2 * 8 + 2]) // centered source at (row=2, col=2)
+        // 4x4 into 8x8 → dstTop=dstLeft=2, chroma at (1,1) on a 4×4 plane.
+        assertEquals(128.toByte(), frame.u[0])
+        assertEquals(128.toByte(), frame.v[0])
+        assertEquals(50.toByte(), frame.u[1 * 4 + 1])
+        assertEquals(60.toByte(), frame.v[1 * 4 + 1])
     }
 
     @Test

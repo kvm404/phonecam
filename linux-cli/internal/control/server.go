@@ -106,6 +106,13 @@ type approveRequest struct {
 	SessionID string `json:"session"`
 }
 
+type leaveRequest struct {
+	SessionID     string `json:"session"`
+	Token         string `json:"token"`
+	ResumeToken   string `json:"resume_token"`
+	PairingSecret string `json:"pairing_secret"`
+}
+
 type statusResponse struct {
 	OK               bool                  `json:"ok"`
 	Approved         bool                  `json:"approved"`
@@ -510,11 +517,38 @@ func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "no active pairing session")
 		return
 	}
+
+	var request leaveRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if request.SessionID != "" && request.SessionID != s.session.Payload().SessionID {
+		writeError(w, http.StatusUnauthorized, "invalid session")
+		return
+	}
+	if !s.leaveAuthorized(r, request) {
+		writeError(w, http.StatusForbidden, "leave is only available to the paired phone or locally")
+		return
+	}
+
 	if s.media != nil {
 		s.media.SetAllow(pairing.RTPSource{})
 	}
 	s.session.ResetPairing()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) leaveAuthorized(r *http.Request, request leaveRequest) bool {
+	if isLoopbackRequest(r.RemoteAddr) {
+		return true
+	}
+	if ip, err := remoteIP(r.RemoteAddr); err == nil {
+		if want, ok := s.session.ControlIP(); ok && want.Equal(ip) {
+			return true
+		}
+	}
+	return s.session.MatchLeaveSecrets(request.SessionID, request.Token, request.ResumeToken, request.PairingSecret)
 }
 
 func (s *Server) pinMedia() {

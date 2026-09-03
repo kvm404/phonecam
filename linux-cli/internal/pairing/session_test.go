@@ -430,6 +430,62 @@ func TestApprovalSucceedsAfterTokenConsumptionEvenIfTTLElapsed(t *testing.T) {
 	}
 }
 
+func TestControlIPPendingAndApproved(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	if _, ok := session.ControlIP(); ok {
+		t.Fatal("expected no control IP before consume")
+	}
+	req := tokenRequest(session, session.Payload().Token)
+	if err := session.ConsumeToken(req, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ip, ok := session.ControlIP()
+	if !ok || !ip.Equal(req.ControlIP) {
+		t.Fatalf("pending ControlIP=%v ok=%v, want %v", ip, ok, req.ControlIP)
+	}
+	if _, ok := session.ApprovedControlIP(); ok {
+		t.Fatal("ApprovedControlIP must stay empty until approve")
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ip, ok = session.ControlIP()
+	if !ok || !ip.Equal(req.ControlIP) {
+		t.Fatalf("approved ControlIP=%v ok=%v, want %v", ip, ok, req.ControlIP)
+	}
+}
+
+func TestMatchLeaveSecrets(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	session := newTestSession(t, Config{Now: now})
+	payload := session.Payload()
+	if !session.MatchLeaveSecrets(payload.SessionID, payload.Token, "", "") {
+		t.Fatal("QR leave secrets should match even before consume")
+	}
+	if session.MatchLeaveSecrets(payload.SessionID, "nope", "", "") {
+		t.Fatal("wrong token must not match")
+	}
+	req := tokenRequest(session, payload.Token)
+	if err := session.ConsumeToken(req, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Approve(now.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	session.SetPairingSecret("pairing-secret")
+	resume := session.ResumeToken()
+	if !session.MatchLeaveSecrets("", "", resume, "") {
+		t.Fatal("expected resume token to authorize leave")
+	}
+	if !session.MatchLeaveSecrets("", "", "", "pairing-secret") {
+		t.Fatal("expected pairing secret to authorize leave")
+	}
+	if session.MatchLeaveSecrets("", "", "other", "other") {
+		t.Fatal("wrong secrets must not match")
+	}
+}
+
 func TestResetPairing(t *testing.T) {
 	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	session := newTestSession(t, Config{Now: now})

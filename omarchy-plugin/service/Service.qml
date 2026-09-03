@@ -343,7 +343,6 @@ Item {
     _lastQrJson = ""
     if (exitCode !== 0) {
       _restartAfterStop = false
-      _activeTransition = ""
       lastError = Model.concise(_stopError || ("phonecam stop failed (exit code " + exitCode + ")"))
       phase = resolvedBin === "" ? "missing-binary" : "stopped"
       return
