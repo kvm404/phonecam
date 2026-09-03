@@ -62,6 +62,9 @@ func Verify(sys System, device string) error {
 	}
 
 	if !sys.Exists(device) {
+		if device == "/dev/video10" {
+			return fmt.Errorf("virtual camera %s does not exist; run: sudo phonecam setup", device)
+		}
 		return fmt.Errorf(
 			"virtual camera %s does not exist; load it with: sudo modprobe v4l2loopback video_nr=%s card_label=%s exclusive_caps=1",
 			device, number, ExpectedCardLabel,

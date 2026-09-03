@@ -205,7 +205,8 @@ into an approved session and makes the LAN privacy boundary explicit.
 
 ### `phonecam start`
 
-- Ensures or requests a virtual camera device.
+- Requires an existing PhoneCam virtual camera; if `/dev/video10` is missing,
+  tell the user to run `sudo phonecam setup`. Does not require root.
 - Starts the control server.
 - Allocates an RTP UDP port.
 - Prints virtual device path and status.
@@ -244,14 +245,42 @@ Checks:
 - browser/app visibility guidance.
 - distro-specific install hints.
 
+### `phonecam setup`
+
+Root helper (`sudo phonecam setup`) that actually installs receive-path
+packages and persists the virtual camera. `phonecam install` stays print-only.
+
+- Detect Arch / Fedora / Debian-family via `/etc/os-release` (`DistroFamily`).
+- Install GStreamer + v4l2loopback via pacman / dnf / apt. `gst-plugins-ugly`
+  is smoke-only (`x264enc`) and is not a hard setup requirement.
+- Arch: `v4l2loopback-dkms` plus headers matching the running kernel
+  (`pkgbase-headers`). Ubuntu/Debian: `v4l2loopback-dkms` plus
+  `linux-headers-$(uname -r)`.
+- Fedora: enable RPM Fusion or fail with a doctor-style line that
+  `v4l2loopback` and `gst-libav` are not in stock Fedora.
+- Add `SUDO_USER` to group `video` only when missing.
+- Load v4l2loopback now and persist under `/etc/modprobe.d/phonecam.conf` and
+  `/etc/modules-load.d/phonecam.conf`. Never overwrite an OBS-owned
+  `/etc/modprobe.d/v4l2loopback.conf`.
+- OBS-aware one-module layout: `exclusive_caps` is a per-device CSV. Unloaded
+  module loads `video_nr=10 card_label=PhoneCam exclusive_caps=1`. Loaded
+  PhoneCam on `/dev/video10` with exclusive caps on is left alone. OBS on
+  video0 without a PhoneCam node reloads `devices=2 video_nr=0,10
+  exclusive_caps=1,1` only if nothing holds the devices. `/dev/video10`
+  present but not labeled PhoneCam is a hard failure (do not steal the node).
+- Open TCP 47470 and UDP 47471 only when ufw/firewalld is blocking those
+  ports. `--dry-run` prints the plan and changes nothing.
+
+This command does not ship distro packages and must not auto-modprobe from a
+package postinst.
+
 ### `phonecam install`
 
-MVP install behavior may be documentation-first or helper-script backed. It
-should identify the distro and print/install packages for:
+Print-only distro hints (packages, manual modprobe, firewall). Setup is the
+command that applies them. Hints cover:
 
 - `v4l2loopback`,
 - GStreamer core/tools/plugins,
-- QR rendering dependency if external,
 - kernel headers where needed.
 
 ## Latency Policy

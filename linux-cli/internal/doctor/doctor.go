@@ -24,12 +24,18 @@ const (
 type System interface {
 	LookPath(name string) (string, error)
 	RunCommand(name string, args ...string) error
+	CommandOutput(name string, args ...string) ([]byte, error)
 	Exists(path string) bool
 	CanWrite(path string) bool
 	ReadFile(path string) ([]byte, error)
 	Getenv(name string) string
 	FileMode(path string) (os.FileMode, error)
 	DeviceOpeners(path string) ([]string, error)
+}
+
+// OSReleaseReader is the subset DistroFamily needs so setup can reuse it.
+type OSReleaseReader interface {
+	ReadFile(path string) ([]byte, error)
 }
 
 type Check struct {
@@ -72,7 +78,7 @@ func Run(sys System) Report {
 			Name:    "v4l2loopback module",
 			Status:  StatusFail,
 			Message: "module is not loaded",
-			Fix:     "Load it with: sudo modprobe v4l2loopback video_nr=10 card_label=PhoneCam exclusive_caps=1",
+			Fix:     "Run: sudo phonecam setup",
 		})
 	}
 
@@ -102,7 +108,7 @@ func Run(sys System) Report {
 			Name:    "PhoneCam virtual camera",
 			Status:  StatusFail,
 			Message: "/dev/video10 does not exist",
-			Fix:     "Load v4l2loopback with video_nr=10 card_label=PhoneCam exclusive_caps=1.",
+			Fix:     "Run: sudo phonecam setup",
 		})
 	}
 
@@ -353,9 +359,17 @@ func distroCheck(sys System) Check {
 // firewallCheck detects a common active host firewall (ufw or firewalld) and,
 // if found, warns that it may block PhoneCam's fixed control (TCP 47470) and
 // RTP (UDP 47471) ports, with a distro-appropriate allow command. It is
-// best-effort and never fails the report.
+// best-effort and never fails the report. It does not WARN when the ports are
+// already allowed.
 func firewallCheck(sys System) Check {
 	if sys.RunCommand("systemctl", "is-active", "--quiet", "ufw") == nil {
+		if ufwAllowsPhoneCam(sys) {
+			return Check{
+				Name:    "Firewall",
+				Status:  StatusInfo,
+				Message: "ufw is active and already allows PhoneCam ports (TCP 47470, UDP 47471)",
+			}
+		}
 		return Check{
 			Name:    "Firewall",
 			Status:  StatusWarn,
@@ -487,7 +501,75 @@ func appVisibilityGuidanceCheck() Check {
 	}
 }
 
-func DistroFamily(sys System) string {
+func ufwAllowsPhoneCam(sys System) bool {
+	out, err := sys.CommandOutput("ufw", "status")
+	if err == nil && UFWStatusAllowsPhoneCam(string(out)) {
+		return true
+	}
+	// `ufw status` typically needs root. Non-root doctor still has the
+	// persisted rule files, which match firewalld's already-allows path.
+	for _, path := range []string{"/etc/ufw/user.rules", "/etc/ufw/user6.rules"} {
+		data, err := sys.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if UFWRulesAllowPhoneCam(string(data)) {
+			return true
+		}
+	}
+	return false
+}
+
+// UFWStatusAllowsPhoneCam reports whether `ufw status` already allows the
+// PhoneCam control (TCP 47470) and RTP (UDP 47471) ports.
+func UFWStatusAllowsPhoneCam(status string) bool {
+	tcp, udp := false, false
+	for _, line := range strings.Split(status, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if lower == "" || strings.HasPrefix(lower, "to ") || strings.HasPrefix(lower, "--") {
+			continue
+		}
+		if strings.Contains(lower, "deny") || strings.Contains(lower, "reject") {
+			continue
+		}
+		if !strings.Contains(lower, "allow") {
+			continue
+		}
+		if strings.Contains(lower, "47470/tcp") {
+			tcp = true
+		}
+		if strings.Contains(lower, "47471/udp") {
+			udp = true
+		}
+	}
+	return tcp && udp
+}
+
+// UFWRulesAllowPhoneCam reports whether ufw's persisted user.rules already
+// accept PhoneCam control (TCP 47470) and RTP (UDP 47471). Used when `ufw
+// status` is unreadable without root.
+func UFWRulesAllowPhoneCam(rules string) bool {
+	tcp, udp := false, false
+	for _, line := range strings.Split(rules, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if lower == "" || strings.HasPrefix(lower, "#") {
+			continue
+		}
+		accept := strings.Contains(lower, "-j accept") || strings.Contains(lower, " allow ")
+		if !accept {
+			continue
+		}
+		if strings.Contains(lower, "47470") && strings.Contains(lower, "tcp") {
+			tcp = true
+		}
+		if strings.Contains(lower, "47471") && strings.Contains(lower, "udp") {
+			udp = true
+		}
+	}
+	return tcp && udp
+}
+
+func DistroFamily(sys OSReleaseReader) string {
 	data, err := sys.ReadFile("/etc/os-release")
 	if err != nil {
 		return "unknown"
