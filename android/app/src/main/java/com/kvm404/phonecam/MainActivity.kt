@@ -593,6 +593,15 @@ class MainActivity : AppCompatActivity() {
 
     /** User-initiated stop of a live session (Leave / Cancel / back on Live), then Home. */
     private fun leaveSession(status: String) {
+        val current = payload ?: StreamingSession.payload
+        if (current != null) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    HttpControlClient().leave(current)
+                } catch (_: Exception) {
+                }
+            }
+        }
         stopStreamingFromUi()
         val stopping = StreamingService.isRunning || bound
         teardownToHome(

@@ -81,6 +81,8 @@ interface ControlClient {
     fun status(payload: PairingPayload): StatusResult
 
     fun reconnect(request: ReconnectRequest): ReconnectResult
+
+    fun leave(payload: PairingPayload): Boolean = false
 }
 
 /**
@@ -212,6 +214,16 @@ class HttpControlClient(
             ReconnectResult.Failure("invalid reconnect response from laptop")
         } catch (e: IOException) {
             ReconnectResult.Failure("could not reach laptop: ${e.message ?: "network error"}")
+        }
+    }
+
+    override fun leave(payload: PairingPayload): Boolean {
+        val url = "${baseUrl(payload)}/leave"
+        return try {
+            val (code, _) = post(url, "{}")
+            code in 200..299
+        } catch (_: Exception) {
+            false
         }
     }
 

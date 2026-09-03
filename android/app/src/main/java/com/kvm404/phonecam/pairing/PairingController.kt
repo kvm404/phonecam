@@ -72,10 +72,6 @@ class PairingController(
 
         _state.value = PairingState.WaitingApproval
         while (true) {
-            if (isExpired(payload)) {
-                _state.value = PairingState.Failed(EXPIRED_MESSAGE)
-                return
-            }
             delay(pollIntervalMs)
             when (val result = client.status(payload)) {
                 is StatusResult.Failure -> {
@@ -103,10 +99,11 @@ class PairingController(
             // Unparseable expiry: don't block pairing on a formatting quirk.
             return false
         }
-        return clock() >= expiresAt
+        return clock() >= expiresAt + CLOCK_SKEW_TOLERANCE_MS
     }
 
     companion object {
         const val EXPIRED_MESSAGE = "pairing code expired — rescan the QR"
+        private const val CLOCK_SKEW_TOLERANCE_MS = 120_000L
     }
 }

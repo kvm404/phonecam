@@ -226,6 +226,8 @@ func (s *Session) ConsumeToken(request TokenRequest, now time.Time) error {
 		}
 	}
 	s.consumed = true
+	s.approved = false
+	s.secretsTaken = false
 	s.pendingPhone = request.Phone
 	s.pendingSource = RTPSource{
 		IP:   append(net.IP(nil), request.ControlIP...),
@@ -259,9 +261,6 @@ func (s *Session) approve(now time.Time, secret string) error {
 	}
 	if s.approved {
 		return nil
-	}
-	if s.isExpiredLocked(now) {
-		return ErrExpired
 	}
 	if !s.consumed {
 		return ErrInvalidToken
@@ -496,6 +495,34 @@ func (s *Session) TakeSecrets() (resume, pairing string, ok bool) {
 		return "", "", false
 	}
 	s.secretsTaken = true
+	return s.resumeToken, s.pairingSecret, true
+}
+
+// ResetPairing resets the pairing session so that a new pairing handshake can take place.
+func (s *Session) ResetPairing() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.consumed = false
+	s.approved = false
+	s.secretsTaken = false
+	s.pendingPhone = Phone{}
+	s.pendingSource = RTPSource{}
+	s.approvedPhone = Phone{}
+	s.rtpSource = nil
+	s.negotiated = nil
+	s.resumeToken = ""
+	s.pairingSecret = ""
+}
+
+// PeekSecrets returns resume and pairing secrets without marking them as taken.
+func (s *Session) PeekSecrets() (resume, pairing string, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.approved || s.invalidated || s.resumeToken == "" {
+		return "", "", false
+	}
 	return s.resumeToken, s.pairingSecret, true
 }
 

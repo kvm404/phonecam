@@ -159,6 +159,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /pair", s.handlePair)
 	s.mux.HandleFunc("POST /approve", s.handleApprove)
 	s.mux.HandleFunc("POST /reconnect", s.handleReconnect)
+	s.mux.HandleFunc("POST /leave", s.handleLeave)
 	s.mux.HandleFunc("GET /status", s.handleStatus)
 	s.mux.HandleFunc("GET /trust", s.handleTrustList)
 	s.mux.HandleFunc("DELETE /trust/{id}", s.handleTrustDelete)
@@ -491,6 +492,28 @@ func (s *Server) handleTrustDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not revoke")
 		return
 	}
+	if s.session != nil {
+		approved := s.session.ApprovedPhone()
+		pending, hasPending := s.session.PendingPhone()
+		if (approved.ID == id || approved.Name == id) || (hasPending && (pending.ID == id || pending.Name == id)) {
+			s.session.Invalidate()
+			if s.media != nil {
+				s.media.SetAllow(pairing.RTPSource{})
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request) {
+	if s.session == nil {
+		writeError(w, http.StatusServiceUnavailable, "no active pairing session")
+		return
+	}
+	if s.media != nil {
+		s.media.SetAllow(pairing.RTPSource{})
+	}
+	s.session.ResetPairing()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -521,7 +544,8 @@ func (s *Server) currentCamera() string {
 	return s.camera
 }
 
-// statusSecrets is the --require-approval one-shot. Loopback and AutoApprove
+// statusSecrets delivers credentials in require-approval mode without destroying
+// them until streaming starts from the approved peer. Loopback and AutoApprove
 // never receive standing credentials on GET /status.
 func (s *Server) statusSecrets(r *http.Request) (resume, pairing string) {
 	if s.autoApprove || s.session == nil || isLoopbackRequest(r.RemoteAddr) {
@@ -535,7 +559,13 @@ func (s *Server) statusSecrets(r *http.Request) (resume, pairing string) {
 	if !ok || !approvedIP.Equal(ip) {
 		return "", ""
 	}
-	resume, pairing, ok = s.session.TakeSecrets()
+	if s.media != nil {
+		st := s.media.Stats()
+		if !st.LastPacket.IsZero() || st.Forwarded > 0 {
+			return "", ""
+		}
+	}
+	resume, pairing, ok = s.session.PeekSecrets()
 	if !ok {
 		return "", ""
 	}
