@@ -220,4 +220,32 @@ object FrameConverter {
         }
         return out
     }
+
+    /**
+     * Horizontally flip a tightly-packed I420 [frame] in place.
+     * Reverses each row of Y, U, and V planes using two pointers without any memory allocation.
+     * Returns the same [frame] instance.
+     */
+    fun flipHorizontallyInPlace(frame: FrameData): FrameData {
+        flipPlaneHorizontallyInPlace(frame.y, frame.width, frame.height)
+        val chromaWidth = frame.width / 2
+        val chromaHeight = frame.height / 2
+        flipPlaneHorizontallyInPlace(frame.u, chromaWidth, chromaHeight)
+        flipPlaneHorizontallyInPlace(frame.v, chromaWidth, chromaHeight)
+        return frame
+    }
+
+    private fun flipPlaneHorizontallyInPlace(plane: ByteArray, width: Int, height: Int) {
+        for (row in 0 until height) {
+            var left = row * width
+            var right = left + width - 1
+            while (left < right) {
+                val tmp = plane[left]
+                plane[left] = plane[right]
+                plane[right] = tmp
+                left++
+                right--
+            }
+        }
+    }
 }
