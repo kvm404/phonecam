@@ -295,6 +295,8 @@ class StreamingService : LifecycleService() {
         super.onCreate()
         isRunning = true
         createNotificationChannel()
+        applyPersistedFacing()
+        loadMirrorPreference()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -519,6 +521,7 @@ class StreamingService : LifecycleService() {
     }
 
     private fun bindCamera(isFlip: Boolean = false, previous: CameraSelector? = null) {
+        loadMirrorPreference()
         val provider = cameraProvider
         if (provider != null) {
             bindCamera(provider, isFlip, previous)
@@ -546,6 +549,7 @@ class StreamingService : LifecycleService() {
         if (!providerHasCamera(provider, requested)) {
             if (isFlip) {
                 cameraSelector = previous ?: oppositeSelector(requested)
+                loadMirrorPreference()
                 notifyNoOtherCamera()
                 callback?.onCameraReady()
                 return

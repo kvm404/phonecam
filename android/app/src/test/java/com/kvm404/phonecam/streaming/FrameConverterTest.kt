@@ -384,4 +384,97 @@ class FrameConverterTest {
         assertArrayEquals(byteArrayOf(40, 41), flipped.u)
         assertArrayEquals(byteArrayOf(80, 81), flipped.v)
     }
+
+    @Test
+    fun `rotate 180 followed by flipHorizontallyInPlace transforms frame correctly`() {
+        val f = frame(4, 2, ts = 54321L)
+        val rotated = FrameConverter.rotate(f, 180)
+        assertEquals(4, rotated.width)
+        assertEquals(2, rotated.height)
+
+        val flipped = FrameConverter.flipHorizontallyInPlace(rotated)
+        assertSame(rotated, flipped)
+        assertEquals(4, flipped.width)
+        assertEquals(2, flipped.height)
+        assertEquals(54321L, flipped.timestampUs)
+
+        // 180 CW rotates both axes; horizontal flip inverts x back:
+        // row 0: 10, 11, 12, 13
+        // row 1: 0, 1, 2, 3
+        assertArrayEquals(
+            byteArrayOf(10, 11, 12, 13, 0, 1, 2, 3),
+            flipped.y,
+        )
+        assertArrayEquals(byteArrayOf(40, 41), flipped.u)
+        assertArrayEquals(byteArrayOf(80, 81), flipped.v)
+    }
+
+    @Test
+    fun `rotate 270 followed by flipHorizontallyInPlace transforms frame correctly`() {
+        val f = frame(4, 2, ts = 67890L)
+        val rotated = FrameConverter.rotate(f, 270)
+        assertEquals(2, rotated.width)
+        assertEquals(4, rotated.height)
+
+        val flipped = FrameConverter.flipHorizontallyInPlace(rotated)
+        assertSame(rotated, flipped)
+        assertEquals(2, flipped.width)
+        assertEquals(4, flipped.height)
+        assertEquals(67890L, flipped.timestampUs)
+
+        // After 270 CW + horizontal flip:
+        //  13, 3
+        //  12, 2
+        //  11, 1
+        //  10, 0
+        assertArrayEquals(
+            byteArrayOf(13, 3, 12, 2, 11, 1, 10, 0),
+            flipped.y,
+        )
+        assertArrayEquals(byteArrayOf(41, 40), flipped.u)
+        assertArrayEquals(byteArrayOf(81, 80), flipped.v)
+    }
+
+    @Test
+    fun `flipHorizontallyInPlace handles minimal 2x2 frame and 0x0 frame safely`() {
+        val f22 = frame(2, 2, ts = 1L)
+        val flipped22 = FrameConverter.flipHorizontallyInPlace(f22)
+        assertSame(f22, flipped22)
+        assertArrayEquals(byteArrayOf(1, 0, 11, 10), flipped22.y)
+        assertArrayEquals(byteArrayOf(40), flipped22.u)
+        assertArrayEquals(byteArrayOf(80), flipped22.v)
+
+        val empty = FrameData(
+            width = 0,
+            height = 0,
+            y = ByteArray(0),
+            u = ByteArray(0),
+            v = ByteArray(0),
+            timestampUs = 0L,
+        )
+        val flippedEmpty = FrameConverter.flipHorizontallyInPlace(empty)
+        assertSame(empty, flippedEmpty)
+        assertEquals(0, flippedEmpty.y.size)
+    }
+
+    @Test
+    fun `flipHorizontallyInPlace operates in sub-millisecond time on 1080p frame`() {
+        val f1080 = FrameData(
+            width = 1920,
+            height = 1080,
+            y = ByteArray(1920 * 1080),
+            u = ByteArray(960 * 540),
+            v = ByteArray(960 * 540),
+            timestampUs = 123456L,
+        )
+        // Warm up
+        repeat(5) { FrameConverter.flipHorizontallyInPlace(f1080) }
+
+        val start = System.nanoTime()
+        FrameConverter.flipHorizontallyInPlace(f1080)
+        val elapsedMs = (System.nanoTime() - start) / 1_000_000.0
+
+        // In-place byte swapping for 1920x1080 (3.1 MB total) typically takes < 5ms on modern JVM
+        org.junit.Assert.assertTrue("Elapsed time $elapsedMs ms should be < 50ms", elapsedMs < 50.0)
+    }
 }
