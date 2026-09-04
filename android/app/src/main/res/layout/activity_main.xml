@@ -308,7 +308,8 @@
                         android:id="@+id/livePreview"
                         android:layout_width="match_parent"
                         android:layout_height="180dp"
-                        android:contentDescription="@string/preview_content_description" />
+                        android:contentDescription="@string/preview_content_description"
+                        app:implementationMode="compatible" />
 
                     <include
                         android:id="@+id/viewfinderOverlay"
@@ -405,6 +406,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="8dp"
                 android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="1"
                 android:text="@string/btn_flip_camera"
                 android:visibility="gone"
                 app:icon="@drawable/ic_flip"
@@ -417,8 +420,11 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:checkable="true"
-                android:text="@string/btn_mirror"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="@string/btn_mirror_off"
                 android:visibility="gone"
+                app:backgroundTint="@color/pc_mirror_button"
                 app:icon="@drawable/ic_mirror"
                 tools:visibility="visible" />
         </LinearLayout>

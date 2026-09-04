@@ -49,6 +49,7 @@ import com.kvm404.phonecam.pairing.VideoProfile
 import com.kvm404.phonecam.pairing.deviceOrientationToSurfaceRotation
 import com.kvm404.phonecam.pairing.quantizeOrientation
 import com.kvm404.phonecam.streaming.BitrateController
+import com.kvm404.phonecam.streaming.CameraMirror
 import com.kvm404.phonecam.streaming.CanvasComposer
 import com.kvm404.phonecam.streaming.FrameConverter
 import com.kvm404.phonecam.streaming.RtpPacketizer
@@ -282,8 +283,10 @@ class StreamingService : LifecycleService() {
     @Volatile
     private var streaming = false
 
-    @Volatile
-    private var isMirrored = false
+    private val mirrorStore = CameraMirror(
+        getBoolean = { key, default -> prefs().getBoolean(key, default) },
+        putBoolean = { key, value -> prefs().edit().putBoolean(key, value).apply() },
+    )
 
     /** First-bind fell back; publish cameraLabel() once reconnectController exists. */
     @Volatile
@@ -376,14 +379,12 @@ class StreamingService : LifecycleService() {
         bindCamera(isFlip = true, previous = previous)
     }
 
-    fun isMirrored(): Boolean = isMirrored
+    fun isMirrored(): Boolean = mirrorStore.isMirrored
 
     fun isFrontCamera(): Boolean = cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA
 
     fun toggleMirror(): Boolean {
-        val next = !isMirrored
-        isMirrored = next
-        persistMirror()
+        val next = mirrorStore.toggleMirror(cameraLabel())
         callback?.onMirrorChanged(next)
         return next
     }
@@ -492,7 +493,7 @@ class StreamingService : LifecycleService() {
     /** Release the camera, encoder, socket, locks and listener. Idempotent. */
     private fun releasePipeline() {
         streaming = false
-        isMirrored = false
+        mirrorStore.releaseRam()
         reconnectController?.cancel()
         watchdogJob?.cancel()
         healthJob?.cancel()
@@ -712,7 +713,7 @@ class StreamingService : LifecycleService() {
                 targetHeight = canvas.height,
             )
             val rotated = FrameConverter.rotate(cropped, rotation)
-            if (isMirrored) FrameConverter.flipHorizontallyInPlace(rotated)
+            if (mirrorStore.isMirrored) FrameConverter.flipHorizontallyInPlace(rotated)
             val frame = CanvasComposer.compose(rotated, canvas.width, canvas.height)
             videoEncoder?.encode(frame)
         } catch (e: IllegalArgumentException) {
@@ -910,14 +911,8 @@ class StreamingService : LifecycleService() {
         prefs().edit().putString(CameraFacing.PREF_KEY, cameraLabel()).apply()
     }
 
-    private fun persistMirror() {
-        prefs().edit().putBoolean("camera_mirror_" + cameraLabel(), isMirrored).apply()
-    }
-
     private fun loadMirrorPreference() {
-        val facing = cameraLabel()
-        isMirrored = prefs().getBoolean("camera_mirror_" + facing, false)
-        callback?.onMirrorChanged(isMirrored)
+        callback?.onMirrorChanged(mirrorStore.loadMirrorPreference(cameraLabel()))
     }
 
     private fun prefs() = getSharedPreferences("phonecam", Context.MODE_PRIVATE)

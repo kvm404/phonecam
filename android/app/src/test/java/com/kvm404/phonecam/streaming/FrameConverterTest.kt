@@ -361,78 +361,78 @@ class FrameConverterTest {
 
     @Test
     fun `rotate 90 followed by flipHorizontallyInPlace transforms frame correctly`() {
-        val f = frame(4, 2, ts = 12345L)
+        // 4x4 so chroma is 2-wide; a 4x2 frame would leave 1-wide chroma where H-flip is a no-op.
+        val f = frame(4, 4, ts = 12345L)
         val rotated = FrameConverter.rotate(f, 90)
-        assertEquals(2, rotated.width)
-        assertEquals(4, rotated.height)
-
-        val flipped = FrameConverter.flipHorizontallyInPlace(rotated)
-        assertSame(rotated, flipped)
-        assertEquals(2, flipped.width)
-        assertEquals(4, flipped.height)
-        assertEquals(12345L, flipped.timestampUs)
-
-        // After 90 CW + horizontal flip:
-        //  0, 10
-        //  1, 11
-        //  2, 12
-        //  3, 13
-        assertArrayEquals(
-            byteArrayOf(0, 10, 1, 11, 2, 12, 3, 13),
-            flipped.y,
-        )
-        assertArrayEquals(byteArrayOf(40, 41), flipped.u)
-        assertArrayEquals(byteArrayOf(80, 81), flipped.v)
-    }
-
-    @Test
-    fun `rotate 180 followed by flipHorizontallyInPlace transforms frame correctly`() {
-        val f = frame(4, 2, ts = 54321L)
-        val rotated = FrameConverter.rotate(f, 180)
         assertEquals(4, rotated.width)
-        assertEquals(2, rotated.height)
+        assertEquals(4, rotated.height)
 
         val flipped = FrameConverter.flipHorizontallyInPlace(rotated)
         assertSame(rotated, flipped)
         assertEquals(4, flipped.width)
-        assertEquals(2, flipped.height)
-        assertEquals(54321L, flipped.timestampUs)
+        assertEquals(4, flipped.height)
+        assertEquals(12345L, flipped.timestampUs)
 
-        // 180 CW rotates both axes; horizontal flip inverts x back:
-        // row 0: 10, 11, 12, 13
-        // row 1: 0, 1, 2, 3
+        // After 90 CW + horizontal flip:
+        //  0  10 20 30
+        //  1  11 21 31
+        //  2  12 22 32
+        //  3  13 23 33
         assertArrayEquals(
-            byteArrayOf(10, 11, 12, 13, 0, 1, 2, 3),
+            byteArrayOf(0, 10, 20, 30, 1, 11, 21, 31, 2, 12, 22, 32, 3, 13, 23, 33),
             flipped.y,
         )
-        assertArrayEquals(byteArrayOf(40, 41), flipped.u)
-        assertArrayEquals(byteArrayOf(80, 81), flipped.v)
+        // Chroma 2x2: 90 CW then H-flip is not the original and not a chroma no-op.
+        assertArrayEquals(byteArrayOf(40, 50, 41, 51), flipped.u)
+        assertArrayEquals(byteArrayOf(80, 90, 81, 91), flipped.v)
     }
 
     @Test
-    fun `rotate 270 followed by flipHorizontallyInPlace transforms frame correctly`() {
-        val f = frame(4, 2, ts = 67890L)
-        val rotated = FrameConverter.rotate(f, 270)
-        assertEquals(2, rotated.width)
+    fun `rotate 180 followed by flipHorizontallyInPlace transforms frame correctly`() {
+        val f = frame(4, 4, ts = 54321L)
+        val rotated = FrameConverter.rotate(f, 180)
+        assertEquals(4, rotated.width)
         assertEquals(4, rotated.height)
 
         val flipped = FrameConverter.flipHorizontallyInPlace(rotated)
         assertSame(rotated, flipped)
-        assertEquals(2, flipped.width)
+        assertEquals(4, flipped.width)
+        assertEquals(4, flipped.height)
+        assertEquals(54321L, flipped.timestampUs)
+
+        // 180 then H-flip is a vertical flip of the original 4x4.
+        assertArrayEquals(
+            byteArrayOf(30, 31, 32, 33, 20, 21, 22, 23, 10, 11, 12, 13, 0, 1, 2, 3),
+            flipped.y,
+        )
+        assertArrayEquals(byteArrayOf(50, 51, 40, 41), flipped.u)
+        assertArrayEquals(byteArrayOf(90, 91, 80, 81), flipped.v)
+    }
+
+    @Test
+    fun `rotate 270 followed by flipHorizontallyInPlace transforms frame correctly`() {
+        val f = frame(4, 4, ts = 67890L)
+        val rotated = FrameConverter.rotate(f, 270)
+        assertEquals(4, rotated.width)
+        assertEquals(4, rotated.height)
+
+        val flipped = FrameConverter.flipHorizontallyInPlace(rotated)
+        assertSame(rotated, flipped)
+        assertEquals(4, flipped.width)
         assertEquals(4, flipped.height)
         assertEquals(67890L, flipped.timestampUs)
 
         // After 270 CW + horizontal flip:
-        //  13, 3
-        //  12, 2
-        //  11, 1
-        //  10, 0
+        //  33 23 13 3
+        //  32 22 12 2
+        //  31 21 11 1
+        //  30 20 10 0
         assertArrayEquals(
-            byteArrayOf(13, 3, 12, 2, 11, 1, 10, 0),
+            byteArrayOf(33, 23, 13, 3, 32, 22, 12, 2, 31, 21, 11, 1, 30, 20, 10, 0),
             flipped.y,
         )
-        assertArrayEquals(byteArrayOf(41, 40), flipped.u)
-        assertArrayEquals(byteArrayOf(81, 80), flipped.v)
+        assertArrayEquals(byteArrayOf(51, 41, 50, 40), flipped.u)
+        assertArrayEquals(byteArrayOf(91, 81, 90, 80), flipped.v)
     }
 
     @Test
@@ -459,22 +459,52 @@ class FrameConverterTest {
 
     @Test
     fun `flipHorizontallyInPlace operates in sub-millisecond time on 1080p frame`() {
+        val width = 1920
+        val height = 1080
+        val cw = width / 2
+        val ch = height / 2
+        fun patterned(size: Int, mul: Int) = ByteArray(size) { i -> ((i * mul) % 251).toByte() }
         val f1080 = FrameData(
-            width = 1920,
-            height = 1080,
-            y = ByteArray(1920 * 1080),
-            u = ByteArray(960 * 540),
-            v = ByteArray(960 * 540),
+            width = width,
+            height = height,
+            y = patterned(width * height, 1),
+            u = patterned(cw * ch, 3),
+            v = patterned(cw * ch, 7),
             timestampUs = 123456L,
         )
-        // Warm up
-        repeat(5) { FrameConverter.flipHorizontallyInPlace(f1080) }
+        val origY0 = f1080.y[0]
+        val origYRight = f1080.y[width - 1]
+        val origYLastLeft = f1080.y[(height - 1) * width]
+        val origU0 = f1080.u[0]
+        val origURight = f1080.u[cw - 1]
+        val origVLastLeft = f1080.v[(ch - 1) * cw]
+        val origVLastRight = f1080.v[(ch - 1) * cw + (cw - 1)]
+
+        val warmup = FrameData(
+            width = width,
+            height = height,
+            y = ByteArray(width * height),
+            u = ByteArray(cw * ch),
+            v = ByteArray(cw * ch),
+            timestampUs = 0L,
+        )
+        repeat(5) { FrameConverter.flipHorizontallyInPlace(warmup) }
 
         val start = System.nanoTime()
         FrameConverter.flipHorizontallyInPlace(f1080)
         val elapsedMs = (System.nanoTime() - start) / 1_000_000.0
 
-        // In-place byte swapping for 1920x1080 (3.1 MB total) typically takes < 5ms on modern JVM
-        org.junit.Assert.assertTrue("Elapsed time $elapsedMs ms should be < 50ms", elapsedMs < 50.0)
+        assertEquals(origYRight, f1080.y[0])
+        assertEquals(origY0, f1080.y[width - 1])
+        assertEquals(origYLastLeft, f1080.y[(height - 1) * width + (width - 1)])
+        assertEquals(origURight, f1080.u[0])
+        assertEquals(origU0, f1080.u[cw - 1])
+        assertEquals(origVLastRight, f1080.v[(ch - 1) * cw])
+        assertEquals(origVLastLeft, f1080.v[(ch - 1) * cw + (cw - 1)])
+        // One 30fps frame is 33ms; a no-op would pass a loose bound without the U/V asserts.
+        org.junit.Assert.assertTrue(
+            "Elapsed time $elapsedMs ms should be under the 30fps budget (33ms)",
+            elapsedMs < 33.0,
+        )
     }
 }

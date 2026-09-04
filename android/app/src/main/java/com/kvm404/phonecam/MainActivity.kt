@@ -36,6 +36,7 @@ import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -595,6 +596,7 @@ class MainActivity : AppCompatActivity() {
         unbindScanCamera()
         binding.livePreview.scaleX = 1f
         binding.mirrorButton.isChecked = false
+        binding.mirrorButton.setText(R.string.btn_mirror_off)
         payload = null
         committedProfile = null
         showHome(status)
@@ -953,9 +955,9 @@ class MainActivity : AppCompatActivity() {
         val shouldInvertView = if (isFront) !isMirrored else isMirrored
         binding.livePreview.scaleX = if (shouldInvertView) -1f else 1f
         binding.mirrorButton.isChecked = isMirrored
-        binding.mirrorButton.contentDescription = getString(
-            if (isMirrored) R.string.btn_mirror_on else R.string.btn_mirror_off,
-        )
+        val label = if (isMirrored) R.string.btn_mirror_on else R.string.btn_mirror_off
+        binding.mirrorButton.setText(label)
+        binding.mirrorButton.contentDescription = getString(label)
     }
 
     /**
@@ -991,6 +993,8 @@ class MainActivity : AppCompatActivity() {
     /** Attach the live preview to the service's Preview use case while visible + streaming. */
     private fun attachPreviewIfLive() {
         if (screenState == ScreenState.LIVE && isStreaming()) {
+            // PERFORMANCE (SurfaceView) ignores View.setScaleX; COMPATIBLE uses TextureView.
+            binding.livePreview.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             streamingService?.attachPreview(binding.livePreview.surfaceProvider)
         }
     }
