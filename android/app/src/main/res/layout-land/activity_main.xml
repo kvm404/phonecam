@@ -407,16 +407,36 @@
                         app:icon="@drawable/ic_zoom_reset" />
                 </LinearLayout>
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/flipCameraButton"
-                    style="@style/Widget.PhoneCam.Button.Outlined"
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:text="@string/btn_flip_camera"
-                    android:visibility="gone"
-                    app:icon="@drawable/ic_flip"
-                    tools:visibility="visible" />
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/flipCameraButton"
+                        style="@style/Widget.PhoneCam.Button.Outlined"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="8dp"
+                        android:layout_weight="1"
+                        android:text="@string/btn_flip_camera"
+                        android:visibility="gone"
+                        app:icon="@drawable/ic_flip"
+                        tools:visibility="visible" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/mirrorButton"
+                        style="@style/Widget.PhoneCam.Button.Outlined"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:checkable="true"
+                        android:text="@string/btn_mirror"
+                        android:visibility="gone"
+                        app:icon="@drawable/ic_mirror"
+                        tools:visibility="visible" />
+                </LinearLayout>
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/leaveButton"

@@ -37,6 +37,9 @@
     <string name="live_badge">Live</string>
     <string name="live_quality_caption">%1$dp · %2$d</string>
     <string name="btn_flip_camera">Flip</string>
+    <string name="btn_mirror">Mirror</string>
+    <string name="btn_mirror_on">Mirror: On</string>
+    <string name="btn_mirror_off">Mirror: Off</string>
     <string name="no_other_camera">No other camera</string>
     <string name="zoom_in_content_description">Zoom in</string>
     <string name="zoom_out_content_description">Zoom out</string>

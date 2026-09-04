@@ -219,6 +219,10 @@ class MainActivity : AppCompatActivity() {
         override fun onZoomChanged() {
             runOnUiThread { updateZoomRow() }
         }
+
+        override fun onMirrorChanged(isMirrored: Boolean) {
+            runOnUiThread { updateMirrorUi(isMirrored) }
+        }
     }
 
     private val phoneIdentity: PhoneIdentity by lazy {
@@ -360,6 +364,9 @@ class MainActivity : AppCompatActivity() {
         binding.flipCameraButton.setOnClickListener {
             streamingService?.flipCamera()
             attachPreviewIfLive()
+        }
+        binding.mirrorButton.setOnClickListener {
+            streamingService?.toggleMirror()
         }
         binding.zoomInButton.setOnClickListener { streamingService?.zoomIn() }
         binding.zoomOutButton.setOnClickListener { streamingService?.zoomOut() }
@@ -586,6 +593,8 @@ class MainActivity : AppCompatActivity() {
         rtpIdentity?.close()
         rtpIdentity = null
         unbindScanCamera()
+        binding.livePreview.scaleX = 1f
+        binding.mirrorButton.isChecked = false
         payload = null
         committedProfile = null
         showHome(status)
@@ -905,6 +914,7 @@ class MainActivity : AppCompatActivity() {
             (health is StreamHealth.Reconnecting || health is StreamHealth.Failed)
         val showFlip = streaming && streamingService?.canFlipCamera() == true
         binding.flipCameraButton.visibility = if (showFlip) View.VISIBLE else View.GONE
+        binding.mirrorButton.visibility = if (streaming) View.VISIBLE else View.GONE
         if (streaming && reconnecting) {
             val name = streamingService?.laptopName() ?: payload?.name.orEmpty()
             binding.liveStatus.text = getString(R.string.live_reconnecting, name)
@@ -934,6 +944,18 @@ class MainActivity : AppCompatActivity() {
             binding.previewCard.visibility = View.VISIBLE
         }
         updateZoomRow()
+        updateMirrorUi()
+    }
+
+    private fun updateMirrorUi(mirrorState: Boolean? = null) {
+        val isMirrored = mirrorState ?: (streamingService?.isMirrored() == true)
+        val isFront = streamingService?.isFrontCamera() == true
+        val shouldInvertView = if (isFront) !isMirrored else isMirrored
+        binding.livePreview.scaleX = if (shouldInvertView) -1f else 1f
+        binding.mirrorButton.isChecked = isMirrored
+        binding.mirrorButton.contentDescription = getString(
+            if (isMirrored) R.string.btn_mirror_on else R.string.btn_mirror_off,
+        )
     }
 
     /**

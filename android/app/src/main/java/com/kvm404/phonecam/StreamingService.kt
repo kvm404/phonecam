@@ -187,6 +187,9 @@ class StreamingService : LifecycleService() {
 
         /** The streaming camera's zoom state/range changed; refresh the zoom row. */
         fun onZoomChanged() {}
+
+        /** Stream mirror state changed; refresh the mirror toggle and viewfinder inversion. */
+        fun onMirrorChanged(isMirrored: Boolean) {}
     }
 
     inner class LocalBinder : Binder() {
@@ -279,6 +282,9 @@ class StreamingService : LifecycleService() {
     @Volatile
     private var streaming = false
 
+    @Volatile
+    private var isMirrored = false
+
     /** First-bind fell back; publish cameraLabel() once reconnectController exists. */
     @Volatile
     private var reportCameraAfterRecovery = false
@@ -366,6 +372,18 @@ class StreamingService : LifecycleService() {
         val previous = cameraSelector
         cameraSelector = oppositeSelector(previous)
         bindCamera(isFlip = true, previous = previous)
+    }
+
+    fun isMirrored(): Boolean = isMirrored
+
+    fun isFrontCamera(): Boolean = cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA
+
+    fun toggleMirror(): Boolean {
+        val next = !isMirrored
+        isMirrored = next
+        persistMirror()
+        callback?.onMirrorChanged(next)
+        return next
     }
 
     /** Latest zoom snapshot from the streaming camera, or null when no range is known. */
@@ -472,6 +490,7 @@ class StreamingService : LifecycleService() {
     /** Release the camera, encoder, socket, locks and listener. Idempotent. */
     private fun releasePipeline() {
         streaming = false
+        isMirrored = false
         reconnectController?.cancel()
         watchdogJob?.cancel()
         healthJob?.cancel()
@@ -537,6 +556,7 @@ class StreamingService : LifecycleService() {
                 return
             }
             cameraSelector = fallback
+            loadMirrorPreference()
             try {
                 bindUseCasesAfterUnbind(provider, fallback)
             } catch (e: Exception) {
@@ -549,6 +569,7 @@ class StreamingService : LifecycleService() {
             scheduleBoundCameraReport()
             return
         }
+        loadMirrorPreference()
         try {
             bindUseCasesAfterUnbind(provider, requested)
             if (isFlip) persistFacing()
@@ -556,6 +577,7 @@ class StreamingService : LifecycleService() {
         } catch (e: Exception) {
             if (isFlip) {
                 cameraSelector = previous ?: oppositeSelector(requested)
+                loadMirrorPreference()
                 try {
                     bindUseCasesAfterUnbind(provider, cameraSelector, resetTo1x = false)
                 } catch (rebind: Exception) {
@@ -686,6 +708,7 @@ class StreamingService : LifecycleService() {
                 targetHeight = canvas.height,
             )
             val rotated = FrameConverter.rotate(cropped, rotation)
+            if (isMirrored) FrameConverter.flipHorizontallyInPlace(rotated)
             val frame = CanvasComposer.compose(rotated, canvas.width, canvas.height)
             videoEncoder?.encode(frame)
         } catch (e: IllegalArgumentException) {
@@ -881,6 +904,16 @@ class StreamingService : LifecycleService() {
 
     private fun persistFacing() {
         prefs().edit().putString(CameraFacing.PREF_KEY, cameraLabel()).apply()
+    }
+
+    private fun persistMirror() {
+        prefs().edit().putBoolean("camera_mirror_" + cameraLabel(), isMirrored).apply()
+    }
+
+    private fun loadMirrorPreference() {
+        val facing = cameraLabel()
+        isMirrored = prefs().getBoolean("camera_mirror_" + facing, false)
+        callback?.onMirrorChanged(isMirrored)
     }
 
     private fun prefs() = getSharedPreferences("phonecam", Context.MODE_PRIVATE)
