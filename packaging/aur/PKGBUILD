@@ -3,7 +3,7 @@
 # Refresh pkgver and sha256sums from the GitHub release SHA256SUMS on each tag.
 
 pkgname=phonecam-bin
-pkgver=0.3.2
+pkgver=0.3.3
 pkgrel=1
 pkgdesc="Use an Android phone as a Linux webcam over LAN"
 arch=('x86_64' 'aarch64')
