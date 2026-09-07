@@ -1,5 +1,9 @@
 # PhoneCam
 
+<p align="center">
+  <img src="docs/assets/hero.jpg" alt="PhoneCam - Use your Android phone as a high-definition Linux webcam" width="100%">
+</p>
+
 Use your Android phone as a webcam on Linux, over your local network. It shows
 up in Meet, Zoom, Discord, OBS, and browsers as a normal `v4l2loopback` camera.
 
