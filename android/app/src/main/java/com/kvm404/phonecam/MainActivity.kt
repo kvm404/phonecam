@@ -62,6 +62,7 @@ import com.kvm404.phonecam.pairing.StreamQuality
 import com.kvm404.phonecam.pairing.TrustedLaptop
 import com.kvm404.phonecam.pairing.TrustedLaptops
 import com.kvm404.phonecam.pairing.VideoProfile
+import com.kvm404.phonecam.streaming.CameraMirror
 import com.kvm404.phonecam.streaming.ZoomStepper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -951,9 +952,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateMirrorUi(mirrorState: Boolean? = null) {
         val isMirrored = mirrorState ?: (streamingService?.isMirrored() == true)
-        val isFront = streamingService?.isFrontCamera() == true
-        val shouldInvertView = if (isFront) !isMirrored else isMirrored
-        binding.livePreview.scaleX = if (shouldInvertView) -1f else 1f
+        binding.livePreview.scaleX = CameraMirror.viewfinderScaleX(isMirrored)
         binding.mirrorButton.isChecked = isMirrored
         val label = if (isMirrored) R.string.btn_mirror_on else R.string.btn_mirror_off
         binding.mirrorButton.setText(label)

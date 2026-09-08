@@ -85,4 +85,36 @@ class CameraMirrorTest {
         assertTrue(store.loadMirrorPreference(CameraFacing.BACK))
         assertFalse(store.loadMirrorPreference(CameraFacing.FRONT))
     }
+
+    @Test
+    fun `viewfinderScaleX returns 1f when mirror is off and -1f when mirror is on`() {
+        assertEquals(1f, CameraMirror.viewfinderScaleX(isMirrored = false), 0.0f)
+        assertEquals(-1f, CameraMirror.viewfinderScaleX(isMirrored = true), 0.0f)
+    }
+
+    @Test
+    fun `instance viewfinderScaleX tracks mirror state transitions`() {
+        // Default state (mirror OFF) -> scaleX = 1f
+        assertEquals(1f, store.viewfinderScaleX(), 0.0f)
+
+        // Toggle ON -> scaleX = -1f
+        store.toggleMirror(CameraFacing.BACK)
+        assertTrue(store.isMirrored)
+        assertEquals(-1f, store.viewfinderScaleX(), 0.0f)
+
+        // Toggle OFF -> scaleX = 1f
+        store.toggleMirror(CameraFacing.BACK)
+        assertFalse(store.isMirrored)
+        assertEquals(1f, store.viewfinderScaleX(), 0.0f)
+
+        // Switch to Front camera with mirror ON
+        store.toggleMirror(CameraFacing.FRONT)
+        assertTrue(store.isMirrored)
+        assertEquals(-1f, store.viewfinderScaleX(), 0.0f)
+
+        // releaseRam resets in-memory mirror to false -> scaleX = 1f
+        store.releaseRam()
+        assertFalse(store.isMirrored)
+        assertEquals(1f, store.viewfinderScaleX(), 0.0f)
+    }
 }
