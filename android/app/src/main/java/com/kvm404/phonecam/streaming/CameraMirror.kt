@@ -37,10 +37,23 @@ class CameraMirror(
         isMirrored = false
     }
 
+    /** Viewfinder horizontal scale matching the current in-memory mirror state. */
+    fun viewfinderScaleX(): Float = viewfinderScaleX(isMirrored)
+
     companion object {
         const val PREF_PREFIX = "camera_mirror_"
         const val DEFAULT = false
 
         fun prefKey(cameraLabel: String): String = PREF_PREFIX + cameraLabel
+
+        /**
+         * Calculates viewfinder horizontal scale from mirror state.
+         *
+         * CameraX PreviewView naturally renders the back camera unmirrored and the front
+         * camera mirrored (selfie orientation).
+         * - Mirror OFF (`isMirrored = false`): `scaleX = 1f` (natural orientation).
+         * - Mirror ON (`isMirrored = true`): `scaleX = -1f` (inverted orientation, matching stream flip).
+         */
+        fun viewfinderScaleX(isMirrored: Boolean): Float = if (isMirrored) -1f else 1f
     }
 }
